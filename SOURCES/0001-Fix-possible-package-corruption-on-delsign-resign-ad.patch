@@ -1,0 +1,59 @@
+From d4c98d15f1bdeaca4efdc4e2e93cc93cb01d54b5 Mon Sep 17 00:00:00 2001
+From: Florian Festi <ffesti@redhat.com>
+Date: Wed, 20 Nov 2024 14:18:43 +0100
+Subject: [PATCH 1/3] Fix possible package corruption on
+ --delsign/resign/addsign
+
+Make sure we don't overrun the original signature header when
+adjusting reserved size. Fixes a brainfart introduced in commit
+be950eabb84a88e5773e096435c37b92e3d47ebb: the count reservation
+size is relative to the size of the new header, obviously.
+
+Another crucial difference is that when considering whether we can
+transplant the new signature header in the originals place we need
+to consider the real on-disk signature, not the size of its
+immutable region. The immutable region can be much much smaller than
+the physical header if eg the IMA signatures are misplaced outside it,
+making our calculations way off.
+
+Backported from commits:
+1847fd6bea41f96ca545e744ee9ecc2896f6378a
+
+Fixes: RHEL-69518
+---
+ sign/rpmgensig.c | 7 ++++---
+ 1 file changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/sign/rpmgensig.c b/sign/rpmgensig.c
+index d7d58fd4f..576e77f7d 100644
+--- a/sign/rpmgensig.c
++++ b/sign/rpmgensig.c
+@@ -629,8 +629,8 @@ static int rpmSign(const char *rpm, int deleting, int flags)
+ 	flags |= RPMSIGN_FLAG_RPMV3;
+     }
+ 
+-    unloadImmutableRegion(&sigh, RPMTAG_HEADERSIGNATURES);
+     origSigSize = headerSizeof(sigh, HEADER_MAGIC_YES);
++    unloadImmutableRegion(&sigh, RPMTAG_HEADERSIGNATURES);
+ 
+     if (flags & RPMSIGN_FLAG_IMA) {
+ 	if (includeFileSignatures(&sigh, &h))
+@@ -674,12 +674,13 @@ static int rpmSign(const char *rpm, int deleting, int flags)
+ 
+     /* Adjust reserved size for added/removed signatures */
+     if (headerGet(sigh, RPMSIGTAG_RESERVEDSPACE, &utd, HEADERGET_MINMEM)) {
+-	int diff = headerSizeof(sigh, HEADER_MAGIC_YES) - origSigSize;
++	unsigned newSize = headerSizeof(sigh, HEADER_MAGIC_YES);
++	int diff = newSize - origSigSize;
+ 
+ 	/* diff can be zero if nothing was added or removed */
+ 	if (diff) {
+ 	    utd.count -= diff;
+-	    if (utd.count > 0 && utd.count < origSigSize) {
++	    if (utd.count > 0 && newSize + utd.count <= origSigSize) {
+ 		char *zeros = xcalloc(utd.count, sizeof(*zeros));
+ 		utd.data = zeros;
+ 		headerMod(sigh, &utd);
+-- 
+2.48.1
+

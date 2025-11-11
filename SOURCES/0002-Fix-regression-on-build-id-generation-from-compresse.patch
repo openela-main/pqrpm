@@ -1,0 +1,52 @@
+From f1f6f316e9363682edbf1a2f97ceaff2e960c87c Mon Sep 17 00:00:00 2001
+From: Panu Matilainen <pmatilai@redhat.com>
+Date: Fri, 22 Nov 2024 09:40:41 +0200
+Subject: [PATCH 2/3] Fix regression on build-id generation from compressed ELF
+ files
+
+Another cmake fallout - we even have the define in config.h.in but the
+actual test was missing, causing us to never use the compression aware
+dwelf_elf_begin() version.
+
+The only reproducer I'm aware of is a kernel module, and we don't want
+to pull in the huge kernel-devel to the test CI for this. Manually
+verified that cmake looks for and finds it:
+
+	-- Looking for dwelf_elf_begin in dw
+	-- Looking for dwelf_elf_begin in dw - found
+
+And building kernel module, before:
+
+$ rpm -qpl /home/pmatilai/rpmbuild/RPMS/x86_64/kmod-lkm_example-1.0-1.x86_64.rpm
+/lib/modules/6.11.8-300.fc41.x86_64/lkm_example/lkm_example.ko.xz
+
+After:
+
+$ rpm -qpl /home/pmatilai/rpmbuild/RPMS/x86_64/kmod-lkm_example-1.0-1.x86_64.rpm
+/lib/modules/6.11.8-300.fc41.x86_64/lkm_example/lkm_example.ko.xz
+/usr/lib/.build-id
+/usr/lib/.build-id/db
+/usr/lib/.build-id/db/f83477ef46b0e51abd5cc1b9382be1330083c4
+
+(cherry picked from commit fe9a9147821044628cab2f7326c97d8401a2c57e)
+
+Fixes: RHEL-54000
+---
+ CMakeLists.txt | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 7808115c1..6dbf179f3 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -357,6 +357,7 @@ if (LIBELF_FOUND)
+ endif()
+ if (LIBDW_FOUND)
+ 	set(HAVE_LIBDW 1)
++	check_library_exists(dw dwelf_elf_begin "" HAVE_DWELF_ELF_BEGIN)
+ endif()
+ 
+ check_symbol_exists(GLOB_ONLYDIR "glob.h" HAVE_GLOB_ONLYDIR)
+-- 
+2.48.1
+

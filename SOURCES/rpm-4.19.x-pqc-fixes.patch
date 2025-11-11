@@ -1,0 +1,767 @@
+From 44cd08d16596a5d615ff2dadfbaca577133a7161 Mon Sep 17 00:00:00 2001
+From: Panu Matilainen <pmatilai@redhat.com>
+Date: Tue, 5 Aug 2025 13:22:36 +0300
+Subject: [PATCH 01/10] Only ever call pgpDigParamsSalt() on signatures
+
+Ensure the verification item is a signature before calling
+pgpDigParamsSalt(). Otherwise we can end up calling it with the
+character array of a digest instead, which may not end well.
+
+The test relies on debug output from rpm-sequoia so it's a bit feeble,
+but it's the best we can do here.
+
+Should've been in c36c717f41683953b9c23e447a8df0d0ac7c845c.
+
+(cherry picked from commit 5fdfafed00161d538831f329d475a5753e22a197)
+---
+ lib/rpmvs.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/lib/rpmvs.c b/lib/rpmvs.c
+index 3d6227330..afc5fdffb 100644
+--- a/lib/rpmvs.c
++++ b/lib/rpmvs.c
+@@ -429,7 +429,7 @@ void rpmvsInitRange(struct rpmvs_s *sis, int range)
+ 
+ 	    rpmDigestBundleAddID(sis->bundle, sinfo->hashalgo, sinfo->id, 0);
+ 	    /* OpenPGP v6 signatures need a grain of salt to go */
+-	    if (sinfo->sig) {
++	    if (sinfo->type == RPMSIG_SIGNATURE_TYPE && sinfo->sig) {
+ 		const uint8_t *salt = NULL;
+ 		size_t slen = 0;
+ 		if (pgpDigParamsSalt(sinfo->sig, &salt, &slen) == 0 && salt) {
+-- 
+2.51.0
+
+
+From 51885f969f75b16f921a8d8a9f1d0cee810a5c5d Mon Sep 17 00:00:00 2001
+From: Panu Matilainen <pmatilai@redhat.com>
+Date: Wed, 6 Aug 2025 12:37:02 +0300
+Subject: [PATCH 02/10] Fix alternatives mechanism unintentionally kicking in
+ for signatures
+
+Rpm assumes verifiables to be alternative to each other if they share the
+same disabler. This happened to be true when the feature was initially
+added but no longer holds now that multiple signature support was added.
+The alternatives system only applies to digests, so add that missing
+conditional.
+
+The tests are added in the next commit.
+
+Fixes: #3872
+(cherry picked from commit d4092051a884f4e98f8d4831d61b9bdee4f4fd11)
+---
+ lib/rpmvs.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/lib/rpmvs.c b/lib/rpmvs.c
+index afc5fdffb..b8e69955a 100644
+--- a/lib/rpmvs.c
++++ b/lib/rpmvs.c
+@@ -544,8 +544,8 @@ int rpmvsVerify(struct rpmvs_s *sis, int type,
+ 	int strength = (sinfo->type | sinfo->strength);
+ 	int required = 0;
+ 
+-	/* Ignore failure if an alternative exists and verifies ok */
+-	if (sinfo->rc == RPMRC_FAIL) {
++	/* Ignore a digest failure if an alternative exists and verifies ok */
++	if (sinfo->type == RPMSIG_DIGEST_TYPE && sinfo->rc == RPMRC_FAIL) {
+ 	    const struct rpmsinfo_s * alt = getAlt(sis, sinfo);
+ 	    if (alt && alt->rc == RPMRC_OK)
+ 		sinfo->rc = RPMRC_NOTFOUND;
+-- 
+2.51.0
+
+
+From 539ed2d7514781908accab119ee18ba870059747 Mon Sep 17 00:00:00 2001
+From: Panu Matilainen <pmatilai@redhat.com>
+Date: Tue, 12 Aug 2025 13:31:00 +0300
+Subject: [PATCH 03/10] Fix regression on signature size reservation not being
+ used
+
+The signature reservation adjustment is one of those whack-a-mole bugs
+where fixes keep making new bugs appear: the signature reservation was
+broken by 1847fd6bea41f96ca545e744ee9ecc2896f6378a which came from
+be950eabb84a88e5773e096435c37b92e3d47ebb which came from
+5c279fb149a44a1bc4d19e11c3c01942732b8486 and so on.
+
+This seemingly simple thing is pretty tricksy, especially when needing
+to deal with 3rd party signed packages that don't always follow our
+expectations. What 1847fd6bea41f96ca545e744ee9ecc2896f6378a got wrong
+is that the header size before unloadImmutableRegion() will include the the
+region index and data entries, totalling 32 bytes, whereas the other
+calculations are lacking it. And without adjusting for it, the
+difference either causes the mechanism not to work or corrupted
+packages. It also made a mess of the sanity check.
+
+Always take the signature size before the grabbing the immutable region,
+just adjust for the region entry size difference. This handles the
+misplaced IMA signatures in #3469 and other similar quirks with minimum fuss.
+Simplify the reservation adjustment: the diff is for the reservation
+size. If it's negative, the reservation needs to shrink, if positive
+then it needs to grow. This is easier to follow than substracting
+negative numbers to grow it. And now we just need to check that the
+shrink operation doesn't wrap around, otherwise the math takes care of
+itself. Famous last words.
+
+Adjust the post-addsign rpmdump values to match the expected
+behavior rather than the broken one.
+
+Fixes: #3768
+(backported from commit d4e22da91994be7ef4da8183682f33cb3e1173b1)
+---
+ sign/rpmgensig.c | 24 ++++++++++++------------
+ 1 file changed, 12 insertions(+), 12 deletions(-)
+
+diff --git a/sign/rpmgensig.c b/sign/rpmgensig.c
+index 98090521b..5613e5683 100644
+--- a/sign/rpmgensig.c
++++ b/sign/rpmgensig.c
+@@ -723,7 +723,8 @@ static int rpmSign(const char *rpm, int deleting, int flags)
+ 	    flags &= ~(RPMSIGN_FLAG_RPMV4|RPMSIGN_FLAG_RPMV3);
+     }
+ 
+-    origSigSize = headerSizeof(sigh, HEADER_MAGIC_YES);
++    /* Adjust for the region index entry + data getting stripped: 32 bytes */
++    origSigSize = headerSizeof(sigh, HEADER_MAGIC_YES) - 32;
+     unloadImmutableRegion(&sigh, RPMTAG_HEADERSIGNATURES);
+ 
+     if (flags & RPMSIGN_FLAG_IMA) {
+@@ -776,17 +777,16 @@ static int rpmSign(const char *rpm, int deleting, int flags)
+     /* Adjust reserved size for added/removed signatures */
+     if (headerGet(sigh, reserveTag, &utd, HEADERGET_MINMEM)) {
+ 	unsigned newSize = headerSizeof(sigh, HEADER_MAGIC_YES);
+-	int diff = newSize - origSigSize;
+-	/* diff can be zero if nothing was added or removed */
+-	if (diff) {
+-	    utd.count -= diff;
+-	    if (utd.count > 0 && newSize + utd.count <= origSigSize) {
+-		char *zeros = xcalloc(utd.count, sizeof(*zeros));
+-		utd.data = zeros;
+-		headerMod(sigh, &utd);
+-		insSig = 1;
+-		free(zeros);
+-	    }
++	int diff = origSigSize - newSize;
++
++	/* The header doesn't support zero-sized data */
++	if ((diff < 0 && abs(diff) < utd.count) || diff > 0) {
++	    utd.count += diff;
++	    char *zeros = xcalloc(utd.count, sizeof(*zeros));
++	    utd.data = zeros;
++	    headerMod(sigh, &utd);
++	    free(zeros);
++	    insSig = 1;
+ 	}
+     }
+ 
+-- 
+2.51.0
+
+
+From 042f35d2947b2dc30ea66c934a685a7e942ae856 Mon Sep 17 00:00:00 2001
+From: Panu Matilainen <pmatilai@redhat.com>
+Date: Wed, 20 Aug 2025 10:14:46 +0300
+Subject: [PATCH 04/10] Refactor the signing code to allow decisions where we
+ need them
+
+Having sanity checks in makeSigTag() made sense when we only had one set
+of restrictions but now it was only getting in the way, we need to have
+the parsed signature at hand when making decisions about it. Refactor to
+return the raw signature packet from makeGPGSignature() and move the
+sanity checks to putSignature() where we then have all the necessary
+data to make the decisions we need.
+
+Shame on me for missing the point in commit
+ad114b0174c26fa101ce9bbf82930b2c2e421a09 and introducing the tag hack
+instead of doing the right thing. As it often happens, the right thing
+isn't really any more complicated than the "I'll just kludge around this
+for now" hack.
+
+Allegely no functional changes here, this is just prepwork for #3851.
+
+(backported from commit 9f92bbc3be5b52c180240d432b1bd78c1360e0c5)
+---
+ sign/rpmgensig.c | 132 +++++++++++++++++++++++------------------------
+ 1 file changed, 65 insertions(+), 67 deletions(-)
+
+diff --git a/sign/rpmgensig.c b/sign/rpmgensig.c
+index 5613e5683..224524017 100644
+--- a/sign/rpmgensig.c
++++ b/sign/rpmgensig.c
+@@ -128,45 +128,6 @@ exit:
+     return rc;
+ }
+ 
+-/* Wrap a raw signature in an rpmtd and sanity check, return NULL on fail */
+-static rpmtd makeSigTag(uint8_t *pkt, size_t pktlen)
+-{
+-    pgpDigParams sigp = NULL;
+-    rpmtd sigtd = NULL;
+-    unsigned int hash_algo;
+-    int ver;
+-
+-    if (pgpPrtParams(pkt, pktlen, PGPTAG_SIGNATURE, &sigp)) {
+-	rpmlog(RPMLOG_ERR, _("Unsupported OpenPGP signature\n"));
+-	goto exit;
+-    }
+-
+-    hash_algo = pgpDigParamsAlgo(sigp, PGPVAL_HASHALGO);
+-    if (rpmDigestLength(hash_algo) == 0) {
+-	rpmlog(RPMLOG_ERR, _("Unsupported OpenPGP hash algorithm %u\n"), hash_algo);
+-	goto exit;
+-    }
+-
+-    ver = pgpDigParamsVersion(sigp);
+-    if (ver < 4) {
+-	rpmlog(RPMLOG_WARNING, _("Deprecated OpenPGP signature version %d\n"),
+-		ver);
+-    }
+-
+-    /* Looks sane, create the tag data */
+-    sigtd = rpmtdNew();
+-    sigtd->flags |= RPMTD_ALLOCED;
+-    sigtd->count = pktlen;
+-    sigtd->data = memcpy(xmalloc(pktlen), pkt, pktlen);;
+-    sigtd->type = RPM_BIN_TYPE;
+-    /* Hack: the actual tag gets decided in putSignature() based on this */
+-    sigtd->tag = pgpDigParamsAlgo(sigp, PGPVAL_PUBKEYALGO);
+-
+-exit:
+-    pgpDigParamsFree(sigp);
+-    return sigtd;
+-}
+-
+ static char ** signCmd(const char *sigfile)
+ {
+     int argc = 0;
+@@ -297,13 +258,13 @@ exit_nowait:
+ }
+ 
+ /* Generate an OpenPGP signature(s) for a target */
+-static rpmtd makeGPGSignature(sigTarget sigt)
++static int makeGPGSignature(sigTarget sigt, uint8_t **pktp, size_t *lenp)
+ {
+     char * sigfile = rstrscat(NULL, sigt->fileName, ".sig", NULL);
+     struct stat st;
+     uint8_t * pkt = NULL;
+     size_t pktlen = 0;
+-    rpmtd sigtd = NULL;
++    int rc = -1;
+ 
+     if (runGPG(sigt, sigfile))
+ 	goto exit;
+@@ -320,7 +281,6 @@ static rpmtd makeGPGSignature(sigTarget sigt)
+ 
+     {	FD_t fd;
+ 
+-	int rc = 0;
+ 	fd = Fopen(sigfile, "r.ufdio");
+ 	if (fd != NULL && !Ferror(fd)) {
+ 	    rc = Fread(pkt, sizeof(*pkt), pktlen, fd);
+@@ -328,20 +288,22 @@ static rpmtd makeGPGSignature(sigTarget sigt)
+ 	}
+ 	if (rc != pktlen) {
+ 	    rpmlog(RPMLOG_ERR, _("unable to read the signature\n"));
++	    pkt = _free(pkt);
+ 	    goto exit;
+ 	}
+     }
+ 
+     rpmlog(RPMLOG_DEBUG, "Got %zd bytes of OpenPGP sig\n", pktlen);
+ 
+-    /* Parse the signature, change signature tag as appropriate. */
+-    sigtd = makeSigTag(pkt, pktlen);
++    *pktp = pkt;
++    *lenp = pktlen;
++    rc = 0;
++
+ exit:
+     (void) unlink(sigfile);
+     free(sigfile);
+-    free(pkt);
+ 
+-    return sigtd;
++    return rc;
+ }
+ 
+ static void deleteSigs(Header sigh)
+@@ -405,13 +367,34 @@ static int haveSignature(rpmtd sigtd, Header sigh)
+     return rc;
+ }
+ 
+-static int putSignature(Header sigh, rpmtd sigtd, int multisig, int ishdr,
+-			rpmSignFlags flags)
++static int putSignature(Header sigh, uint8_t *pkt, size_t pktlen,
++			int multisig, int ishdr, rpmSignFlags flags)
+ {
+     int rc = -1;
++    unsigned int hash_algo = 0;
++    int ver = 0;
++    pgpDigParams sigp = NULL;
++
++    if (pgpPrtParams(pkt, pktlen, PGPTAG_SIGNATURE, &sigp)) {
++	rpmlog(RPMLOG_ERR, _("Unsupported OpenPGP signature\n"));
++	goto exit;
++    }
++
++    hash_algo = pgpDigParamsAlgo(sigp, PGPVAL_HASHALGO);
++    if (rpmDigestLength(hash_algo) == 0) {
++	rpmlog(RPMLOG_ERR, _("Unsupported OpenPGP hash algorithm %u\n"),
++		hash_algo);
++	goto exit;
++    }
++
++    ver = pgpDigParamsVersion(sigp);
++    if (ver < 4) {
++	rpmlog(RPMLOG_WARNING, _("Deprecated OpenPGP signature version %d\n"),
++	    ver);
++    }
+ 
+     if (multisig) {
+-	char *b64 = rpmBase64Encode(sigtd->data, sigtd->count, 0);
++	char *b64 = rpmBase64Encode(pkt, pktlen, 0);
+ 	char **arr = (char **)xmalloc(1 * sizeof(*arr));
+ 	arr[0] = b64;
+ 
+@@ -431,7 +414,7 @@ static int putSignature(Header sigh, rpmtd sigtd, int multisig, int ishdr,
+ 	}
+ 	rpmtdFreeData(&mtd);
+     } else {
+-	unsigned int pubkey_algo = sigtd->tag;
++	unsigned int pubkey_algo = pgpDigParamsAlgo(sigp, PGPVAL_PUBKEYALGO);
+ 	uint32_t sigtag = 0;
+ 	switch (pubkey_algo) {
+ 	case PGPPUBKEYALGO_DSA:
+@@ -446,9 +429,18 @@ static int putSignature(Header sigh, rpmtd sigtd, int multisig, int ishdr,
+ 	    break;
+ 	}
+ 
+-	if (sigtag) {
+-	    sigtd->tag = sigtag;
+-	    if (haveSignature(sigtd, sigh)) {
++	if (sigtag && ver <= 4) {
++	    struct rpmtd_s sigtd = {
++		.tag = sigtag,
++		.type = RPM_BIN_TYPE,
++		.count = (uint32_t)pktlen,
++		.data = pkt,
++		.flags = 0,
++		.ix = -1,
++		.size = 0,
++	    };
++
++	    if (haveSignature(&sigtd, sigh)) {
+ 		rc = 1;
+ 	    } else {
+ 		/* Only one legacy signature is allowed */
+@@ -456,22 +448,27 @@ static int putSignature(Header sigh, rpmtd sigtd, int multisig, int ishdr,
+ 		    /* Preserve historical behavior */
+ 		    deleteSigs(sigh);
+ 		else
+-		    headerDel(sigh, sigtd->tag);
+-		rc = (headerPut(sigh, sigtd, HEADERPUT_DEFAULT) == 0) ? -1 : 0;
++		    headerDel(sigh, sigtd.tag);
++		rc = (headerPut(sigh, &sigtd, HEADERPUT_DEFAULT) == 0) ? -1 : 0;
+ 	    }
+-	    sigtd->tag = pubkey_algo;
+ 	} else {
+ 	    /* If we did a v6 signature, we can ignore the error here */
+ 	    if (flags & RPMSIGN_FLAG_RPMV6) {
+ 		rc = 0;
+-	    } else {
++		goto exit;
++	    }
++
++	    if (sigtag == 0) {
+ 		rpmlog(RPMLOG_ERR,
+-			_("Unsupported OpenPGP pubkey algorithm %u for rpm v3/v4 signatures\n"),
+-			pubkey_algo);
++		    _("Unsupported OpenPGP pubkey algorithm %u for rpm v3/v4 signatures\n"),
++		    pubkey_algo);
++		goto exit;
+ 	    }
+ 	}
+     }
+ 
++exit:
++    pgpDigParamsFree(sigp);
+     return rc;
+ }
+ 
+@@ -485,38 +482,39 @@ static int addSignature(Header sigh, rpmSignFlags flags,
+ 			sigTarget sigt_v3, sigTarget sigt_v4)
+ {
+     int rc = -1;
+-    rpmtd sigtd = NULL;
++    uint8_t *pkt = NULL;
++    size_t pktlen = 0;
+     
+     /* Make a header signature */
+-    if ((sigtd = makeGPGSignature(sigt_v4)) == NULL)
++    if (makeGPGSignature(sigt_v4, &pkt, &pktlen))
+ 	goto exit;
+ 
+     /* Add a v6 signature if requested */
+     if (flags & RPMSIGN_FLAG_RPMV6)
+-	if ((rc = putSignature(sigh, sigtd, 1, 1, flags)))
++	if ((rc = putSignature(sigh, pkt, pktlen, 1, 1, flags)))
+ 	    goto exit;
+ 
+     /* Add a v4 signature if requested */
+     if (flags & RPMSIGN_FLAG_RPMV4) {
+-	if ((rc = putSignature(sigh, sigtd, 0, 1, flags)))
++	if ((rc = putSignature(sigh, pkt, pktlen, 0, 1, flags)))
+ 	    goto exit;
+ 
+ 	/* Only consider v3 signature if also adding v4 */
+ 	if (flags & RPMSIGN_FLAG_RPMV3) {
+-	    rpmtdFree(sigtd);
++	    pkt = _free(pkt);
+ 
+ 	    /* Assume the same signature test holds for v3 signature too */
+-	    if ((sigtd = makeGPGSignature(sigt_v3)) == NULL)
++	    if (makeGPGSignature(sigt_v3, &pkt, &pktlen))
+ 		goto exit;
+ 
+-	    if ((rc = putSignature(sigh, sigtd, 0, 0, flags)))
++	    if ((rc = putSignature(sigh, pkt, pktlen, 0, 0, flags)))
+ 		goto exit;
+ 	}
+     }
+ 
+     rc = 0;
+ exit:
+-    rpmtdFree(sigtd);
++    free(pkt);
+     return rc;
+ }
+ 
+-- 
+2.51.0
+
+
+From e5d0855cf4c1a3e6581dd3594b76862e791a6736 Mon Sep 17 00:00:00 2001
+From: Panu Matilainen <pmatilai@redhat.com>
+Date: Wed, 20 Aug 2025 10:20:48 +0300
+Subject: [PATCH 05/10] Fix rpmsign possibly copying a OpenPGP v6 signature
+ into legacy tag
+
+With the refactor from the previous commit, this is becomes an utterly
+trivial matter of, gasp, checking the signature version when inserting
+a legacy signature tag.
+
+Fixes: #3851
+(backported from commit f323d5572fcb2734a3bf5a1e564bc73f542c237a)
+---
+ sign/rpmgensig.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/sign/rpmgensig.c b/sign/rpmgensig.c
+index 224524017..2fbbedacf 100644
+--- a/sign/rpmgensig.c
++++ b/sign/rpmgensig.c
+@@ -464,6 +464,12 @@ static int putSignature(Header sigh, uint8_t *pkt, size_t pktlen,
+ 		    pubkey_algo);
+ 		goto exit;
+ 	    }
++	    if (ver > 4) {
++		rpmlog(RPMLOG_ERR,
++		    ("Unsupported OpenPGP version %u for rpm v3/v4 signatures\n"),
++		    ver);
++		goto exit;
++	    }
+ 	}
+     }
+ 
+-- 
+2.51.0
+
+
+From 7c1e89ad67d941f7bd35c26143155332379e7827 Mon Sep 17 00:00:00 2001
+From: Michal Domonkos <mdomonko@redhat.com>
+Date: Thu, 21 Aug 2025 14:54:39 +0200
+Subject: [PATCH 06/10] Revert "Fix --addsign not replacing existing V4
+ signature"
+
+This reverts commit 4c3f4fa2c1c514aa05a15c0756495c1b762e5f17.
+---
+ docs/man/rpmsign.8.md | 2 --
+ sign/rpmgensig.c      | 6 ------
+ tools/rpmsign.c       | 2 +-
+ 3 files changed, 1 insertion(+), 9 deletions(-)
+
+diff --git a/docs/man/rpmsign.8.md b/docs/man/rpmsign.8.md
+index a4b98ce38..d6deebec2 100644
+--- a/docs/man/rpmsign.8.md
++++ b/docs/man/rpmsign.8.md
+@@ -33,8 +33,6 @@ DESCRIPTION
+ **rpmsign** **\--addsign** generates and inserts a new OpenPGP signature
+ for each *PACKAGE\_FILE* given unless a signature with identical
+ parameters already exists, in which case no action is taken.
+-When signing a V4 package, and **\--rpmv6** is not used, any existing
+-signatures are replaced, as if **\--resign** was used instead.
+ Arbitrary number of V6 signatures can be added.
+ 
+ **rpmsign** **\--resign** generates and inserts a new OpenPGP signature
+diff --git a/sign/rpmgensig.c b/sign/rpmgensig.c
+index 2fbbedacf..1856b529f 100644
+--- a/sign/rpmgensig.c
++++ b/sign/rpmgensig.c
+@@ -443,12 +443,6 @@ static int putSignature(Header sigh, uint8_t *pkt, size_t pktlen,
+ 	    if (haveSignature(&sigtd, sigh)) {
+ 		rc = 1;
+ 	    } else {
+-		/* Only one legacy signature is allowed */
+-		if (ishdr && !(flags & RPMSIGN_FLAG_RPMV6))
+-		    /* Preserve historical behavior */
+-		    deleteSigs(sigh);
+-		else
+-		    headerDel(sigh, sigtd.tag);
+ 		rc = (headerPut(sigh, &sigtd, HEADERPUT_DEFAULT) == 0) ? -1 : 0;
+ 	    }
+ 	} else {
+diff --git a/tools/rpmsign.c b/tools/rpmsign.c
+index 41bb89175..4bfec11cd 100644
+--- a/tools/rpmsign.c
++++ b/tools/rpmsign.c
+@@ -34,7 +34,7 @@ static struct poptOption signOptsTable[] = {
+     { "addsign", '\0', (POPT_ARG_VAL|POPT_ARGFLAG_OR), &mode, MODE_ADDSIGN,
+ 	N_("sign package(s)"), NULL },
+     { "resign", '\0', (POPT_ARG_VAL|POPT_ARGFLAG_OR), &mode, MODE_RESIGN,
+-	N_("sign package(s), replacing any existing signatures"), NULL },
++	N_("sign package(s) (identical to --addsign)"), NULL },
+     { "delsign", '\0', (POPT_ARG_VAL|POPT_ARGFLAG_OR), &mode, MODE_DELSIGN,
+ 	N_("delete package signatures"), NULL },
+ #if defined(WITH_IMAEVM) || defined(WITH_FSVERITY)
+-- 
+2.51.0
+
+
+From 6490a7183dc4851c3b228c3e46119d2ef5085442 Mon Sep 17 00:00:00 2001
+From: Panu Matilainen <pmatilai@redhat.com>
+Date: Wed, 26 Mar 2025 10:43:37 +0200
+Subject: [PATCH 07/10] Fix --addsign/--resign help text to match new behavior
+
+This should've been in 5630cf4bcbaae85d1b53e7a57ba6c7ed86b62e7d.
+
+Related: #3385
+(cherry picked from commit 8580b386ca7d00a2625417a0f1c7ada398cccc00)
+---
+ tools/rpmsign.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/tools/rpmsign.c b/tools/rpmsign.c
+index 4bfec11cd..724ff546b 100644
+--- a/tools/rpmsign.c
++++ b/tools/rpmsign.c
+@@ -32,9 +32,9 @@ static struct rpmSignArgs sargs = {NULL, 0, 0};
+ 
+ static struct poptOption signOptsTable[] = {
+     { "addsign", '\0', (POPT_ARG_VAL|POPT_ARGFLAG_OR), &mode, MODE_ADDSIGN,
+-	N_("sign package(s)"), NULL },
++	N_("sign package(s), adding a new signature"), NULL },
+     { "resign", '\0', (POPT_ARG_VAL|POPT_ARGFLAG_OR), &mode, MODE_RESIGN,
+-	N_("sign package(s) (identical to --addsign)"), NULL },
++	N_("resign package(s), deleting any previous signatures"), NULL },
+     { "delsign", '\0', (POPT_ARG_VAL|POPT_ARGFLAG_OR), &mode, MODE_DELSIGN,
+ 	N_("delete package signatures"), NULL },
+ #if defined(WITH_IMAEVM) || defined(WITH_FSVERITY)
+-- 
+2.51.0
+
+
+From 5f0eb56faad3597ac914a622a861e776e27dd663 Mon Sep 17 00:00:00 2001
+From: Michal Domonkos <mdomonko@redhat.com>
+Date: Wed, 13 Aug 2025 14:13:12 +0200
+Subject: [PATCH 08/10] Fix rpmsign possibly adding multiple legacy tags
+
+Commit 5630cf4bcbaae85d1b53e7a57ba6c7ed86b62e7d fixed the semantics of
+--addsign to never delete signatures, just add. This worked implicitly
+for v6 signatures but was only partially handled for legacy (v4 or v3)
+signatures, which can be added in the following ways:
+
+1. Signing a v4 package without --rpmv6 (native signature)
+2. Signing a v4 package with --rpmv6 (compat signature)
+3. Signing a v6 package with --rpmv4 (compat signature)
+
+The commit prevented the addition of multiple legacy signatures in the
+second case but still allowed any number of them otherwise. Since the
+legacy tags aren't arrays, we would end up just duplicating them.
+
+Fix this by moving the haveLegacySig() check to putSignature() so that
+we catch all legacy signature additions. Doing it here also allows us to
+preserve the identical signature warning, which in turn makes it easier
+to backport this patch to the RPM 4.x series where this can't regress.
+
+Since v3 signatures are added after v4 in addSignature(), do check for
+the correct tags in haveLegacySig() now, otherwise we would always skip
+the former. This also fixes the case where --rpmv3 would have no effect
+when combined with --rpmv6 on a package that already has a v4 signature.
+
+See the updated tests for the exact behavior that's changed or fixed.
+
+Fixes: 3878
+(backported from commit 0632d9120a571a8b384b845e94bff6a438f6fd17)
+---
+ sign/rpmgensig.c | 19 +++++++++----------
+ 1 file changed, 9 insertions(+), 10 deletions(-)
+
+diff --git a/sign/rpmgensig.c b/sign/rpmgensig.c
+index 1856b529f..8753c1b7f 100644
+--- a/sign/rpmgensig.c
++++ b/sign/rpmgensig.c
+@@ -367,6 +367,12 @@ static int haveSignature(rpmtd sigtd, Header sigh)
+     return rc;
+ }
+ 
++static int haveLegacySig(Header sigh, int ishdr)
++{
++    return headerIsEntry(sigh, ishdr ? RPMSIGTAG_RSA : RPMSIGTAG_PGP) ||
++	   headerIsEntry(sigh, ishdr ? RPMSIGTAG_DSA : RPMSIGTAG_GPG);
++}
++
+ static int putSignature(Header sigh, uint8_t *pkt, size_t pktlen,
+ 			int multisig, int ishdr, rpmSignFlags flags)
+ {
+@@ -441,7 +447,9 @@ static int putSignature(Header sigh, uint8_t *pkt, size_t pktlen,
+ 	    };
+ 
+ 	    if (haveSignature(&sigtd, sigh)) {
+-		rc = 1;
++		rc = (flags & RPMSIGN_FLAG_RPMV6) ? 0 : 1;
++	    } else if (haveLegacySig(sigh, ishdr)) {
++		rc = 0;
+ 	    } else {
+ 		rc = (headerPut(sigh, &sigtd, HEADERPUT_DEFAULT) == 0) ? -1 : 0;
+ 	    }
+@@ -472,12 +480,6 @@ exit:
+     return rc;
+ }
+ 
+-static int haveLegacySig(Header sigh)
+-{
+-    return headerIsEntry(sigh, RPMSIGTAG_RSA) ||
+-	   headerIsEntry(sigh, RPMSIGTAG_DSA);
+-}
+-
+ static int addSignature(Header sigh, rpmSignFlags flags,
+ 			sigTarget sigt_v3, sigTarget sigt_v4)
+ {
+@@ -716,9 +718,6 @@ static int rpmSign(const char *rpm, int deleting, int flags)
+     } else {
+ 	flags |= RPMSIGN_FLAG_RPMV4;
+ 	reserveTag = RPMSIGTAG_RESERVEDSPACE;
+-	/* Ensure only one legacy signature is added if adding v6 signatures */
+-	if ((flags & RPMSIGN_FLAG_RPMV6) && haveLegacySig(sigh))
+-	    flags &= ~(RPMSIGN_FLAG_RPMV4|RPMSIGN_FLAG_RPMV3);
+     }
+ 
+     /* Adjust for the region index entry + data getting stripped: 32 bytes */
+-- 
+2.51.0
+
+
+From e2216cae4f9abe9ea44c18142282bb07d5a89996 Mon Sep 17 00:00:00 2001
+From: Michal Domonkos <mdomonko@redhat.com>
+Date: Wed, 13 Aug 2025 16:36:04 +0200
+Subject: [PATCH 09/10] Fail when adding a legacy signature and one exists
+
+Instead of silently skipping, bail out with an error message when adding
+a native, legacy signature to a v4 package that already has one. This is
+more user-friendly and avoids nasty surprises since --addsign previously
+[*] always replaced existing signatures.
+
+[*] Before commit 5630cf4bcbaae85d1b53e7a57ba6c7ed86b62e7d
+
+(backported from commit 5986d5f1186221676befc46d1bd97c096df1a1cf)
+---
+ sign/rpmgensig.c | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/sign/rpmgensig.c b/sign/rpmgensig.c
+index 8753c1b7f..24183452a 100644
+--- a/sign/rpmgensig.c
++++ b/sign/rpmgensig.c
+@@ -449,7 +449,7 @@ static int putSignature(Header sigh, uint8_t *pkt, size_t pktlen,
+ 	    if (haveSignature(&sigtd, sigh)) {
+ 		rc = (flags & RPMSIGN_FLAG_RPMV6) ? 0 : 1;
+ 	    } else if (haveLegacySig(sigh, ishdr)) {
+-		rc = 0;
++		rc = (flags & RPMSIGN_FLAG_RPMV6) ? 0 : 2;
+ 	    } else {
+ 		rc = (headerPut(sigh, &sigtd, HEADERPUT_DEFAULT) == 0) ? -1 : 0;
+ 	    }
+@@ -766,6 +766,13 @@ static int rpmSign(const char *rpm, int deleting, int flags)
+ 		/* Identical signature is not an error */
+ 		res = 0;
+ 	    }
++	    if (res == 2) {
++		rpmlog(RPMLOG_ERR,
++		   _("%s already contains a legacy signature\n"),
++		   rpm);
++		/* Existing signature is an error */
++		res = -1;
++	    }
+ 	    goto exit;
+ 	}
+ 	res = -1;
+-- 
+2.51.0
+
+
+From 3e2a93df7f08cbee286730e6fc58d784da2c5034 Mon Sep 17 00:00:00 2001
+From: Michal Domonkos <mdomonko@redhat.com>
+Date: Mon, 25 Aug 2025 14:26:42 +0200
+Subject: [PATCH 10/10] Refactor legacy signature presence checks
+
+No functional change, just makes the logic (perhaps) a bit more obvious.
+The goto isn't necessary right now but makes the new if block consistent
+with the other similar ones.
+
+(cherry picked from commit b015dcce484706a92ff639985f003138e5dfd494)
+---
+ sign/rpmgensig.c | 10 ++++++++--
+ 1 file changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/sign/rpmgensig.c b/sign/rpmgensig.c
+index 24183452a..33c9510e0 100644
+--- a/sign/rpmgensig.c
++++ b/sign/rpmgensig.c
+@@ -447,12 +447,18 @@ static int putSignature(Header sigh, uint8_t *pkt, size_t pktlen,
+ 	    };
+ 
+ 	    if (haveSignature(&sigtd, sigh)) {
+-		rc = (flags & RPMSIGN_FLAG_RPMV6) ? 0 : 1;
++		rc = 1;
+ 	    } else if (haveLegacySig(sigh, ishdr)) {
+-		rc = (flags & RPMSIGN_FLAG_RPMV6) ? 0 : 2;
++		rc = 2;
+ 	    } else {
+ 		rc = (headerPut(sigh, &sigtd, HEADERPUT_DEFAULT) == 0) ? -1 : 0;
+ 	    }
++
++	    /* Legacy signatures are best-effort in v6 mode */
++	    if ((flags & RPMSIGN_FLAG_RPMV6) && rc > 0) {
++		rc = 0;
++		goto exit;
++	    }
+ 	} else {
+ 	    /* If we did a v6 signature, we can ignore the error here */
+ 	    if (flags & RPMSIGN_FLAG_RPMV6) {
+-- 
+2.51.0
+
+diff -up rpm-4.19.1.1/docs/man/rpmsign.8.orig rpm-4.19.1.1/docs/man/rpmsign.8
+--- rpm-4.19.1.1/docs/man/rpmsign.8.orig	2025-08-26 09:33:51.043737142 +0200
++++ rpm-4.19.1.1/docs/man/rpmsign.8	2025-08-26 09:34:08.721970618 +0200
+@@ -19,9 +19,6 @@ rpmsign \- RPM Package Signing
+ OpenPGP signature for each \f[I]PACKAGE_FILE\f[R] given unless a
+ signature with identical parameters already exists, in which case no
+ action is taken.
+-When signing a V4 package, and \f[B]\-\-rpmv6\f[R] is not used, any
+-existing signatures are replaced, as if \f[B]\-\-resign\f[R] was used
+-instead.
+ Arbitrary number of V6 signatures can be added.
+ .PP
+ \f[B]rpmsign\f[R] \f[B]\-\-resign\f[R] generates and inserts a new

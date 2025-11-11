@@ -1,0 +1,672 @@
+From fdf88aa9cae15bb21d533d103cb8201caafaefbc Mon Sep 17 00:00:00 2001
+From: Panu Matilainen <pmatilai@redhat.com>
+Date: Wed, 9 Apr 2025 09:58:40 +0300
+Subject: [PATCH] Store configurable digest(s) on packages from verification
+ into the rpmdb
+
+It can be hard to reliably map packages in repositories to installed
+packages because the common repodata format only stores package-level
+checksums, whereas packages themselves cannot contain such a checksum
+for obvious reasons. The NEVRA information is nowhere near enough to
+uniquely identify a package. Technically of course, the repodata could
+be extended to carry header checksums but it seems that format is next
+to impossible to change, so...
+
+Having rpm calculate and store a configurable set of hashes has the
+benefit of serving as a cross-check that the package we installed was
+bit-per-bit identical to what was in the repository, even after the fact.
+
+Backported from commits:
+c0d84d40a94478e94943271dcc6c1213275dcf10
+cdf8ac7f07d75b941df90484684e87366e50cfe5
+49844e90bc352372b31035934fa51ff438c89a00
+a41a2c30cc9b0cc67d4d87c600cfdcec68751784
+f08348247203105cc40679ed7aef1f0c4d1d1770
+55d22df4c8d7cf703d431ff6ebaa442275129e06
+
+Fixes: RHEL-84062
+---
+ docs/man/rpm.8.md    |   4 ++
+ docs/manual/tags.md  |   2 +
+ include/rpm/rpmtag.h |   2 +
+ include/rpm/rpmtd.h  |   1 +
+ lib/formats.c        |  10 +++++
+ lib/psm.c            |  21 +++++++++
+ lib/rpmte.c          |  13 ++++++
+ lib/rpmte_internal.h |   3 ++
+ lib/transaction.c    | 105 +++++++++++++++++++++++++++++++------------
+ macros.in            |  17 +++++++
+ tests/CMakeLists.txt |   1 +
+ tests/mktree.common  |   1 +
+ tests/prpm.py        |  80 +++++++++++++++++++++++++++++++++
+ tests/rpmgeneral.at  |   2 +
+ tests/rpmi.at        |   1 +
+ tests/rpmpython2.at  |  41 +++++++++++++++++
+ tests/rpmquery.at    |  15 +++++++
+ tests/rpmsigdig.at   |  36 +++++++++++++++
+ tests/rpmtests.at    |   1 +
+ 19 files changed, 328 insertions(+), 28 deletions(-)
+ create mode 100755 tests/prpm.py
+ create mode 100644 tests/rpmpython2.at
+
+diff --git a/docs/man/rpm.8.md b/docs/man/rpm.8.md
+index 8ce06cf3e..c9c4473fd 100644
+--- a/docs/man/rpm.8.md
++++ b/docs/man/rpm.8.md
+@@ -534,6 +534,10 @@ Alternate output formats may be requested by following the tag with
+ 
+ :   Format file verify status.
+ 
++**:hashalgo**
++
++:   Display hash algorithm name.
++
+ **:hex**
+ 
+ :   Format in hexadecimal.
+diff --git a/docs/manual/tags.md b/docs/manual/tags.md
+index 86ddbf876..fef69ab64 100644
+--- a/docs/manual/tags.md
++++ b/docs/manual/tags.md
+@@ -331,6 +331,8 @@ Instprefixes   | 1099 | string array
+ Origbasenames  | 1120 | string array | Original Basenames (relocated packages only)
+ Origdirindexes | 1119 | int32 array  | Original Dirindexes (relocated packages only)
+ Origdirnames   | 1121 | string array | Original Dirnames (relocated packages only)
++Packagedigests | 5118 | string array | Package digests calculated during verification
++Packagedigestalgos | 5119 | int32    | Algorithms used for Packagedigests
+ 
+ 
+ ## Source packages
+diff --git a/include/rpm/rpmtag.h b/include/rpm/rpmtag.h
+index dec9c9244..8da7cf518 100644
+--- a/include/rpm/rpmtag.h
++++ b/include/rpm/rpmtag.h
+@@ -386,6 +386,8 @@ typedef enum rpmTag_e {
+     RPMTAG_PREUNTRANSFLAGS	= 5107, /* i */
+     RPMTAG_POSTUNTRANSFLAGS	= 5108, /* i */
+     RPMTAG_SYSUSERS		= 5109, /* s[] extension */
++    RPMTAG_PACKAGEDIGESTS	= 5118, /* s[] */
++    RPMTAG_PACKAGEDIGESTALGOS	= 5119, /* i[] */
+ 
+     RPMTAG_FIRSTFREE_TAG	/*!< internal */
+ } rpmTag;
+diff --git a/include/rpm/rpmtd.h b/include/rpm/rpmtd.h
+index c592905fa..99dce6a83 100644
+--- a/include/rpm/rpmtd.h
++++ b/include/rpm/rpmtd.h
+@@ -253,6 +253,7 @@ typedef enum rpmtdFormats_e {
+     RPMTD_FORMAT_HUMANIEC	= 21,	/* human readable value, K = 1024 (int types) */
+     RPMTD_FORMAT_TAGNAME	= 22,	/* tag name (any type) */
+     RPMTD_FORMAT_TAGNUM		= 23,	/* tag number (any type) */
++    RPMTD_FORMAT_HASHALGO	= 25,	/* digest algorithm name (int types) */
+ } rpmtdFormats;
+ 
+ /** \ingroup rpmtd
+diff --git a/lib/formats.c b/lib/formats.c
+index 156812165..303c12cbb 100644
+--- a/lib/formats.c
++++ b/lib/formats.c
+@@ -494,6 +494,14 @@ static char *tagnumFormat(rpmtd td, char **emsg)
+     return num;
+ }
+ 
++static char *hashalgoFormat(rpmtd td, char **emsg)
++{
++    const char *alg = pgpValString(PGPVAL_HASHALGO, rpmtdGetNumber(td));
++    if (rstreqn(alg, "Unknown", 7))
++	alg = "Unknown";
++    return rstrdup(alg);
++}
++
+ static const struct headerFmt_s rpmHeaderFormats[] = {
+     { RPMTD_FORMAT_STRING,	"string",
+ 	RPM_ANY_CLASS,		stringFormat },
+@@ -545,6 +553,8 @@ static const struct headerFmt_s rpmHeaderFormats[] = {
+ 	RPM_ANY_CLASS,		tagnameFormat },
+     { RPMTD_FORMAT_TAGNUM,	"tagnum",
+ 	RPM_ANY_CLASS,		tagnumFormat },
++    { RPMTD_FORMAT_HASHALGO,	"hashalgo",
++	RPM_NUMERIC_CLASS,	hashalgoFormat },
+     { -1,			NULL, 		0,	NULL }
+ };
+ 
+diff --git a/lib/psm.c b/lib/psm.c
+index ddc339357..39261b9f4 100644
+--- a/lib/psm.c
++++ b/lib/psm.c
+@@ -716,9 +716,26 @@ static void markReplacedInstance(rpmts ts, rpmte te)
+     rpmdbFreeIterator(mi);
+ }
+ 
++static void mergeAux(Header auxh, Header h)
++{
++    struct rpmtd_s td;
++    HeaderIterator hi = headerInitIterator(auxh);
++    while (headerNext(hi, &td)) {
++	/* Don't allow overwriting package data from aux */
++	if (headerIsEntry(h, td.tag))
++	    continue;
++	if (rpmtdCount(&td) > 0) {
++	    (void) headerPut(h, &td, HEADERPUT_DEFAULT);
++	}
++	rpmtdFreeData(&td);
++    }
++    headerFreeIterator(hi);
++}
++
+ static rpmRC dbAdd(rpmts ts, rpmte te)
+ {
+     Header h = rpmteHeader(te);
++    Header auxh = rpmteHeaderAux(te, 0);
+     rpm_time_t installTime = rpmtsGetTime(ts, 1);
+     rpmfs fs = rpmteGetFileStates(te);
+     rpm_count_t fc = rpmfsFC(fs);
+@@ -735,6 +752,9 @@ static rpmRC dbAdd(rpmts ts, rpmte te)
+     headerPutUint32(h, RPMTAG_INSTALLTIME, &installTime, 1);
+     headerPutUint32(h, RPMTAG_INSTALLCOLOR, &tscolor, 1);
+ 
++    if (auxh)
++	mergeAux(auxh, h);
++
+     (void) rpmswEnter(rpmtsOp(ts, RPMTS_OP_DBADD), 0);
+     rc = (rpmdbAdd(rpmtsGetRdb(ts), h) == 0) ? RPMRC_OK : RPMRC_FAIL;
+     (void) rpmswExit(rpmtsOp(ts, RPMTS_OP_DBADD), 0);
+@@ -744,6 +764,7 @@ static rpmRC dbAdd(rpmts ts, rpmte te)
+ 	packageHashAddEntry(ts->members->installedPackages,
+ 			    headerGetInstance(h), te);
+     }
++    headerFree(auxh);
+     headerFree(h);
+     return rc;
+ }
+diff --git a/lib/rpmte.c b/lib/rpmte.c
+index d31152a43..657b4e11d 100644
+--- a/lib/rpmte.c
++++ b/lib/rpmte.c
+@@ -32,6 +32,7 @@ struct rpmte_s {
+     void *userdata;		/*!< Application private user data. */
+ 
+     Header h;			/*!< Package header. */
++    Header auxh;		/*!< Auxiliary data (from install) */
+     char * NEVR;		/*!< Package name-version-release. */
+     char * NEVRA;		/*!< Package name-version-release.arch. */
+     char * name;		/*!< Name: */
+@@ -252,6 +253,7 @@ rpmte rpmteFree(rpmte te)
+ 	fdFree(te->fd);
+ 	rpmfilesFree(te->files);
+ 	headerFree(te->h);
++	headerFree(te->auxh);
+ 	rpmfsFree(te->fs);
+ 	rpmpsFree(te->probs);
+ 	rpmteCleanDS(te);
+@@ -279,6 +281,17 @@ rpmte rpmteNew(rpmts ts, Header h, rpmElementType type, fnpyKey key,
+     return p;
+ }
+ 
++Header rpmteHeaderAux(rpmte te, int init)
++{
++    Header auxh = NULL;
++    if (te != NULL) {
++	if (te->auxh == NULL && init == 1)
++	    te->auxh = headerNew();
++	auxh = headerLink(te->auxh);
++    }
++    return auxh;
++}
++
+ unsigned int rpmteDBInstance(rpmte te) 
+ {
+     return (te != NULL ? te->db_instance : 0);
+diff --git a/lib/rpmte_internal.h b/lib/rpmte_internal.h
+index 99b548fcc..e616c0561 100644
+--- a/lib/rpmte_internal.h
++++ b/lib/rpmte_internal.h
+@@ -101,6 +101,9 @@ rpmfs rpmteGetFileStates(rpmte te);
+ RPM_GNUC_INTERNAL
+ void rpmteSetVerified(rpmte te, int verified);
+ 
++RPM_GNUC_INTERNAL
++Header rpmteHeaderAux(rpmte te, int init);
++
+ /** \ingroup rpmte
+  * Retrieve size in bytes of package header.
+  * @param te		transaction element
+diff --git a/lib/transaction.c b/lib/transaction.c
+index 70d2587ac..b828fe395 100644
+--- a/lib/transaction.c
++++ b/lib/transaction.c
+@@ -35,6 +35,7 @@
+ #include "rpmlock.h"
+ #include "rpmds_internal.h"
+ #include "rpmfi_internal.h"	/* only internal apis */
++#include "rpmio_internal.h"
+ #include "rpmte_internal.h"	/* only internal apis */
+ #include "rpmts_internal.h"
+ #include "rpmvs.h"
+@@ -1265,6 +1266,81 @@ static int vfyCb(struct rpmsinfo_s *sinfo, void *cbdata)
+     return (sinfo->rc == 0);
+ }
+ 
++static ARGI_t initPkgDigests(FD_t fd)
++{
++    ARGI_t ids = NULL;
++    char *digests = rpmExpand("%{?_pkgverify_digests}", NULL);
++    ARGV_t vals = argvSplitString(digests, ":", 0);
++
++    for (ARGV_t v = vals; v && *v; v++) {
++	uint32_t alg = atoi(*v);
++	if (alg) {
++	    /* Try to ensure unique ids for the digests */
++	    uint32_t id = (RPMTAG_PACKAGEDIGESTS << 16) | alg;
++	    fdInitDigestID(fd, alg, id, 0);
++	    argiAdd(&ids, -1, id);
++	}
++    }
++
++    argvFree(vals);
++    free(digests);
++    return ids;
++}
++
++static void finiPkgDigests(FD_t fd, ARGI_t ids, Header auxh)
++{
++    for (int i = 0; i < argiCount(ids); i++) {
++	char *pkgdig = NULL;
++	uint32_t id = argiData(ids)[i];
++	fdFiniDigest(fd, id, (void **)&pkgdig, NULL, 1);
++	if (pkgdig) {
++	    uint32_t alg = 0xffff & id;
++	    headerPutString(auxh, RPMTAG_PACKAGEDIGESTS, pkgdig);
++	    headerPutUint32(auxh, RPMTAG_PACKAGEDIGESTALGOS, &alg, 1);
++	    free(pkgdig);
++	}
++    }
++    argiFree(ids);
++}
++
++static int verifyPackage(rpmts ts, rpmte p, struct rpmvs_s *vs, int vfylevel)
++{
++    struct vfydata_s vd = {
++	.msg = NULL,
++	.type = { -1, -1, -1, },
++	.vfylevel = vfylevel,
++    };
++    int verified = 0;
++    rpmRC prc = RPMRC_FAIL;
++    Header auxh = rpmteHeaderAux(p, 1);
++
++    FD_t fd = rpmtsNotify(ts, p, RPMCALLBACK_INST_OPEN_FILE, 0, 0);
++    if (fd != NULL) {
++	ARGI_t ids = initPkgDigests(fd);
++	prc = rpmpkgRead(vs, fd, NULL, NULL, &vd.msg);
++	int test = rpmtsFlags(ts) & RPMTRANS_FLAG_TEST;
++	finiPkgDigests(fd, ids, (test || prc) ? NULL : auxh);
++	rpmtsNotify(ts, p, RPMCALLBACK_INST_CLOSE_FILE, 0, 0);
++    }
++
++    if (prc == RPMRC_OK)
++	prc = rpmvsVerify(vs, RPMSIG_VERIFIABLE_TYPE, vfyCb, &vd);
++
++    /* Record verify result */
++    if (vd.type[RPMSIG_SIGNATURE_TYPE] == RPMRC_OK)
++	verified |= RPMSIG_SIGNATURE_TYPE;
++    if (vd.type[RPMSIG_DIGEST_TYPE] == RPMRC_OK)
++	verified |= RPMSIG_DIGEST_TYPE;
++    rpmteSetVerified(p, verified);
++
++    if (prc)
++	rpmteAddProblem(p, RPMPROB_VERIFY, NULL, vd.msg, 0);
++
++    vd.msg = _free(vd.msg);
++    headerFree(auxh);
++    return prc;
++}
++
+ static int verifyPackageFiles(rpmts ts, rpm_loff_t total)
+ {
+     int rc = 0;
+@@ -1282,35 +1358,8 @@ static int verifyPackageFiles(rpmts ts, rpm_loff_t total)
+     pi = rpmtsiInit(ts);
+     while ((p = rpmtsiNext(pi, TR_ADDED))) {
+ 	struct rpmvs_s *vs = rpmvsCreate(vfylevel, vsflags, keyring);
+-	struct vfydata_s vd = {
+-	    .msg = NULL,
+-	    .type = { -1, -1, -1, },
+-	    .vfylevel = vfylevel,
+-	};
+-	int verified = 0;
+-	rpmRC prc = RPMRC_FAIL;
+-
+ 	rpmtsNotify(ts, p, RPMCALLBACK_VERIFY_PROGRESS, oc++, total);
+-	FD_t fd = rpmtsNotify(ts, p, RPMCALLBACK_INST_OPEN_FILE, 0, 0);
+-	if (fd != NULL) {
+-	    prc = rpmpkgRead(vs, fd, NULL, NULL, &vd.msg);
+-	    rpmtsNotify(ts, p, RPMCALLBACK_INST_CLOSE_FILE, 0, 0);
+-	}
+-
+-	if (prc == RPMRC_OK)
+-	    prc = rpmvsVerify(vs, RPMSIG_VERIFIABLE_TYPE, vfyCb, &vd);
+-
+-	/* Record verify result */
+-	if (vd.type[RPMSIG_SIGNATURE_TYPE] == RPMRC_OK)
+-	    verified |= RPMSIG_SIGNATURE_TYPE;
+-	if (vd.type[RPMSIG_DIGEST_TYPE] == RPMRC_OK)
+-	    verified |= RPMSIG_DIGEST_TYPE;
+-	rpmteSetVerified(p, verified);
+-
+-	if (prc)
+-	    rpmteAddProblem(p, RPMPROB_VERIFY, NULL, vd.msg, 0);
+-
+-	vd.msg = _free(vd.msg);
++	verifyPackage(ts, p, vs, vfylevel);
+ 	rpmvsFree(vs);
+     }
+     rpmtsNotify(ts, NULL, RPMCALLBACK_VERIFY_STOP, total, total);
+diff --git a/macros.in b/macros.in
+index f2a28fa57..8240e9613 100644
+--- a/macros.in
++++ b/macros.in
+@@ -679,6 +679,23 @@ Supplements:   (%{name} = %{version}-%{release} and langpacks-%{1})\
+ # Disabler flags for package verification (similar to vsflags)
+ %_pkgverify_flags 0x0
+ 
++# A colon separated list of hash algorithms to calculate digests on the entire
++# package files during verification. The calculated digests are stored in the
++# Packagedigests tag of packages in the rpmdb, and the corresponding algorithms
++# in in the Packagedigestalgos tag. No package digests are calculated or stored
++# if --noverify is used during package installation.
++#
++# The following hash algorithms are known to rpm, but availability can vary
++# depending how rpm and it's underlying libraries have been built:
++#
++# 1     MD5 (obsolete)
++# 2     SHA1 (obsolete)
++# 8     SHA256
++# 9     SHA384
++# 10    SHA512
++#
++%_pkgverify_digests 8:10
++
+ # Minimize writes during transactions (at the cost of more reads) to
+ # conserve eg SSD disks (EXPERIMENTAL).
+ # 1			enable
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+index 8e3a6f3c5..6f26a8fa8 100644
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -42,6 +42,7 @@ set(TESTSUITE_AT
+ 	rpmreplace.at
+ 	rpmmacro.at
+ 	rpmpython.at
++	rpmpython2.at
+ 	rpmdepmatch.at
+ 	rpmscript.at
+ 	rpmsigdig.at
+diff --git a/tests/mktree.common b/tests/mktree.common
+index 80c359f7e..e6ecfca87 100644
+--- a/tests/mktree.common
++++ b/tests/mktree.common
+@@ -19,6 +19,7 @@ make_install()
+     mkdir -p $DESTDIR/$script_dir
+     cp rpmtests atlocal mktree.common $DESTDIR/$script_dir/
+     cp @CMAKE_CURRENT_SOURCE_DIR@/rpmtests.sh $DESTDIR/$script_dir/
++    cp @CMAKE_CURRENT_SOURCE_DIR@/prpm.py $DESTDIR/@CMAKE_INSTALL_BINDIR@
+ 
+     mkdir -p $DESTDIR/build
+     ln -sf ../data/SOURCES $DESTDIR/build/
+diff --git a/tests/prpm.py b/tests/prpm.py
+new file mode 100755
+index 000000000..b11297675
+--- /dev/null
++++ b/tests/prpm.py
+@@ -0,0 +1,80 @@
++#!/usr/bin/python3
++
++import rpm
++import argparse
++
++class transCb:
++    fds = {}
++
++    def __call__(self, what, amount, total, key, data):
++        if what == rpm.RPMCALLBACK_INST_OPEN_FILE:
++            f = open(key, 'rb')
++            self.fds[key] = f
++            return f.fileno()
++        elif what == rpm.RPMCALLBACK_INST_CLOSE_FILE:
++            del self.fds[key]
++
++def doprobs(ts):
++    for p in ts.problems():
++        print(p)
++
++def runts(ts):
++    probs = ts.run(transCb(), "")
++    if probs:
++        doprobs(ts)
++        return 1
++    return 0
++
++if __name__ == '__main__':
++    parser = argparse.ArgumentParser()
++    parser.add_argument('-i', '--install', nargs='+', default=[])
++    parser.add_argument('-u', '--upgrade', nargs='+', default=[])
++    parser.add_argument('-e', '--erase', nargs='+', default=[])
++    parser.add_argument('-r', '--reinstall', nargs='+', default=[])
++    parser.add_argument('-R', '--restore', nargs='+', default=[])
++    parser.add_argument('--root', default='/', action='store')
++    parser.add_argument('-n', '--dry-run', action='store_true')
++    parser.add_argument('--nosignature', action='store_true')
++    parser.add_argument('--nodeps', action='store_true')
++    parser.add_argument('--noorder', action='store_true')
++    parser.add_argument('-v', '--verbose', action='store_true')
++    args = parser.parse_args()
++
++    ts = rpm.ts(args.root)
++    ovflags = ts.setVSFlags(ts.getVSFlags() | rpm.RPMVSF_MASK_NOSIGNATURES)
++    for arg in args.install:
++        ts.addInstall(arg, arg, 'i')
++    for arg in args.upgrade:
++        ts.addInstall(arg, arg, 'u')
++    for arg in args.reinstall:
++        ts.addReinstall(arg, arg)
++    for arg in args.restore:
++        ts.addRestore(arg, arg)
++    for arg in args.erase:
++        ts.addErase(arg)
++    ts.setVSFlags(ovflags)
++
++    if args.nosignature:
++        ts.setVfyLevel(rpm.RPMSIG_DIGEST_TYPE)
++
++    if not args.noorder:
++        ts.order()
++
++    if not args.nodeps:
++        rc = ts.check()
++        if rc:
++            doprobs(ts)
++            exit(rc)
++
++    oflags = ts.setFlags(rpm.RPMTRANS_FLAG_TEST)
++    if args.verbose:
++        print("Testing")
++    rc = runts(ts)
++    ts.setFlags(oflags)
++
++    if rc == 0 and not args.dry_run:
++        if args.verbose:
++            print("Committing")
++        rc = runts(ts)
++
++    exit(rc)
+diff --git a/tests/rpmgeneral.at b/tests/rpmgeneral.at
+index 1951d2f9f..a1342eff8 100644
+--- a/tests/rpmgeneral.at
++++ b/tests/rpmgeneral.at
+@@ -199,6 +199,8 @@ ORIGDIRNAMES
+ ORIGFILENAMES
+ OS
+ P
++PACKAGEDIGESTALGOS
++PACKAGEDIGESTS
+ PACKAGER
+ PATCH
+ PATCHESFLAGS
+diff --git a/tests/rpmi.at b/tests/rpmi.at
+index 2a571184e..87eb4fbf9 100644
+--- a/tests/rpmi.at
++++ b/tests/rpmi.at
+@@ -44,6 +44,7 @@ runroot rpm -U --ignorearch --ignoreos --nodeps \
+ [0],
+ [],
+ [])
++
+ RPMTEST_CLEANUP
+ 
+ AT_SETUP([rpm -U <manifest glob fallback>])
+diff --git a/tests/rpmpython2.at b/tests/rpmpython2.at
+new file mode 100644
+index 000000000..fe6315a43
+--- /dev/null
++++ b/tests/rpmpython2.at
+@@ -0,0 +1,41 @@
++
++AT_SETUP([prpm install])
++AT_KEYWORDS([install python])
++AT_SKIP_IF([$PYTHON_DISABLED])
++RPMDB_INIT
++
++RPMTEST_CHECK([
++runroot_other prpm.py --nodeps --nosignature \
++		-i /data/RPMS/hello-2.0-1.x86_64.rpm
++],
++[0],
++[],
++[])
++
++RPMTEST_CHECK([[
++runroot rpm -qa --qf "[%{packagedigestalgos:hashalgo} %{packagedigests}\n]"
++]],
++[0],
++[SHA256 e05a5191e214b1f05ae2448ebe493e55c6313ab68eaf040b83baa80e25f15d54
++SHA512 5e0a11bf9c4f353b9197446d722e66cc322030e164929356e3fb669201597be77f3a44b4bd6f4fddf8746768809b43dae28f4fad1de315ef42a78e130847eb05
++],
++[])
++
++RPMTEST_CHECK([
++runroot_other prpm.py --nodeps --nosignature \
++		-i /data/RPMS/hlinktest-1.0-1.noarch.rpm \
++		-e hello
++],
++[0],
++[],
++[])
++
++RPMTEST_CHECK([
++runroot rpm -qa
++],
++[0],
++[hlinktest-1.0-1.noarch
++],
++[])
++
++RPMTEST_CLEANUP
+diff --git a/tests/rpmquery.at b/tests/rpmquery.at
+index 8263fe9ba..7d604ad6e 100644
+--- a/tests/rpmquery.at
++++ b/tests/rpmquery.at
+@@ -420,6 +420,21 @@ runroot rpm \
+ ])
+ RPMTEST_CLEANUP
+ 
++AT_SETUP([hashalgo extension])
++AT_KEYWORDS([query digest])
++RPMTEST_CHECK([
++rpm -q \
++	--qf "%{filedigestalgo:hashalgo}\n" \
++	--qf "%{longsize:hashalgo}\n" \
++	"${RPMTEST}"/data/RPMS/hello-2.0-1.x86_64.rpm
++],
++[0],
++[SHA256
++Unknown
++],
++[])
++RPMTEST_CLEANUP
++
+ # ------------------------------
+ AT_SETUP([integer array perms format query])
+ AT_KEYWORDS([query])
+diff --git a/tests/rpmsigdig.at b/tests/rpmsigdig.at
+index a9c55a654..9111befe0 100644
+--- a/tests/rpmsigdig.at
++++ b/tests/rpmsigdig.at
+@@ -1192,3 +1192,39 @@ rpm -qp --qf "[%{filenames}:%{filesignatures}\n]" hello-2.0-1.x86_64-badima.rpm
+ ],
+ [])
+ RPMTEST_CLEANUP
++
++AT_SETUP([package verification digest])
++AT_KEYWORDS([install digest verify])
++
++RPMTEST_CHECK([
++RPMDB_INIT
++runroot rpm -U \
++		--define "_pkgverify_digests aa:bb:zz" \
++		--ignorearch --ignoreos --nodeps --nosignature --justdb \
++		/data/RPMS/hello-2.0-1.{i686,x86_64}.rpm
++
++runroot rpm -qa --qf "[[%{packagedigestalgos} %{packagedigests}\n]]" | sort -n
++],
++[0],
++[],
++[])
++
++RPMTEST_CHECK([
++RPMDB_INIT
++runroot rpm -U \
++		--define "_pkgverify_digests 2:8:12345:10" \
++		--ignorearch --ignoreos --nodeps --nosignature --justdb \
++		/data/RPMS/hello-2.0-1.{i686,x86_64}.rpm
++
++runroot rpm -qa --qf "[[%{packagedigestalgos:hashalgo} %{packagedigests}\n]]" | sort -n
++],
++[0],
++[SHA1 70d8bfc198823acdec9b3d793770e12ead6ae047
++SHA1 7299fad790a49e571a7ec4d60bef5d51597085fa
++SHA256 3328b90a578d18dba45abc584395795115c6c024abd561ce533ec175619925ff
++SHA256 e05a5191e214b1f05ae2448ebe493e55c6313ab68eaf040b83baa80e25f15d54
++SHA512 4db194ba2cb8b5e5cbb6f8d0dc1ec50be15cb20cdefa74b2b14a74032789b7411f4365dc4e69c7e3e37882f549d5f6e91b863eb51629e6ab72438e54b8eeedf5
++SHA512 5e0a11bf9c4f353b9197446d722e66cc322030e164929356e3fb669201597be77f3a44b4bd6f4fddf8746768809b43dae28f4fad1de315ef42a78e130847eb05
++],
++[])
++RPMTEST_CLEANUP
+diff --git a/tests/rpmtests.at b/tests/rpmtests.at
+index d675452e4..4fbc70fc6 100644
+--- a/tests/rpmtests.at
++++ b/tests/rpmtests.at
+@@ -4,6 +4,7 @@ m4_include([rpmvercmp.at])
+ m4_include([rpmmacro.at])
+ m4_include([rpmdevel.at])
+ m4_include([rpmpython.at])
++m4_include([rpmpython2.at])
+ m4_include([rpmdepmatch.at])
+ m4_include([rpmquery.at])
+ m4_include([rpmspec.at])
+-- 
+2.49.0
+
+diff -up rpm-4.19.1.1/docs/man/rpm.8.orig rpm-4.19.1.1/docs/man/rpm.8
+--- rpm-4.19.1.1/docs/man/rpm.8.orig	2025-04-24 14:18:03.652976012 +0200
++++ rpm-4.19.1.1/docs/man/rpm.8	2025-04-24 14:18:22.279864710 +0200
+@@ -479,6 +479,9 @@ Format file state.
+ \f[B]:fstatus\f[R]
+ Format file verify status.
+ .TP
++\f[B]:hashalgo\f[R]
++Display hash algorithm name.
++.TP
+ \f[B]:hex\f[R]
+ Format in hexadecimal.
+ .TP

@@ -1,0 +1,37 @@
+From 0f1731d648ff37d06bf711c84459b254047b23e0 Mon Sep 17 00:00:00 2001
+From: Michal Domonkos <mdomonko@redhat.com>
+Date: Tue, 22 Apr 2025 14:04:31 +0200
+Subject: [PATCH 3/5] Fix memory leak in runGPG()
+
+Downstream only patch, upstream no longer uses gpg_path here after
+commit 7f2c7136af575ba4854e579f3df547051a2eecfc.
+
+Fixes: RHEL-82284
+---
+ sign/rpmgensig.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/sign/rpmgensig.c b/sign/rpmgensig.c
+index 576e77f7d..f0b4dc891 100644
+--- a/sign/rpmgensig.c
++++ b/sign/rpmgensig.c
+@@ -237,7 +237,7 @@ static int runGPG(sigTarget sigt, const char *sigfile)
+ 	int using_gpg = (strstr(out, "GnuPG") != NULL);
+ 	if (using_gpg) {
+ 	    const char *tty = ttyname(STDIN_FILENO);
+-	    const char *gpg_path = NULL;
++	    char *gpg_path = NULL;
+ 
+ 	    if (!getenv("GPG_TTY") && (!tty || setenv("GPG_TTY", tty, 0)))
+ 		rpmlog(RPMLOG_WARNING, _("Could not set GPG_TTY to stdin: %m\n"));
+@@ -245,6 +245,7 @@ static int runGPG(sigTarget sigt, const char *sigfile)
+ 	    gpg_path = rpmExpand("%{?_gpg_path}", NULL);
+ 	    if (gpg_path && *gpg_path != '\0')
+ 		(void) setenv("GNUPGHOME", gpg_path, 1);
++	    free(gpg_path);
+ 	}
+ 	free(out);
+ 
+-- 
+2.49.0
+

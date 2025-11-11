@@ -1,0 +1,42 @@
+From 370c7d8771dfda9cb53c9d9457f94087bba16134 Mon Sep 17 00:00:00 2001
+From: Michal Domonkos <mdomonko@redhat.com>
+Date: Mon, 30 Jun 2025 12:31:47 +0200
+Subject: [PATCH] Extend RPM version output with "PQC edition"
+
+Make it clear that this is not the system RPM installation when running
+rpmkeys/rpmdb with --version or without any arguments. Use the same
+label ("PQC edition") as in the Summary tag in pqrpm.spec.
+---
+ lib/poptALL.c    | 2 +-
+ tools/cliutils.c | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/lib/poptALL.c b/lib/poptALL.c
+index b24c13ed7..33c1ae95d 100644
+--- a/lib/poptALL.c
++++ b/lib/poptALL.c
+@@ -58,7 +58,7 @@ static int rpmcliInitialized = -1;
+  */
+ static void printVersion(FILE * fp)
+ {
+-    fprintf(fp, _("RPM version %s\n"), rpmEVR);
++    fprintf(fp, _("RPM version %s (PQC edition)\n"), rpmEVR);
+ }
+ 
+ /**
+diff --git a/tools/cliutils.c b/tools/cliutils.c
+index dc630bc8d..996262684 100644
+--- a/tools/cliutils.c
++++ b/tools/cliutils.c
+@@ -21,7 +21,7 @@ void argerror(const char * desc)
+ 
+ static void printVersion(FILE * fp)
+ {
+-    fprintf(fp, _("RPM version %s\n"), rpmEVR);
++    fprintf(fp, _("RPM version %s (PQC edition)\n"), rpmEVR);
+ }
+ 
+ static void printBanner(FILE * fp)
+-- 
+2.50.0
+

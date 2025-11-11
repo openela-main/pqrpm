@@ -1,0 +1,668 @@
+From 9eac03ec09efca60810ea2b655f0f25edc86890b Mon Sep 17 00:00:00 2001
+From: Panu Matilainen <pmatilai@redhat.com>
+Date: Tue, 3 Dec 2024 10:44:46 +0200
+Subject: [PATCH 1/8] Add support for SHA3-256 and SHA3-512
+
+Sequoia doesn't yet support SHA3 so we need to skip it in the default
+CI tests. Tests verified locally with libgrypt and openssl builds.
+
+Fixes: #3436
+(backported from commit 9344367edf654fb41a136793b68cea9abb892fb9)
+---
+ include/rpm/rpmcrypto.h  | 11 +++++++----
+ include/rpm/rpmpgp.h     | 11 +++++++----
+ macros.in                |  2 ++
+ rpmio/digest_libgcrypt.c |  8 ++++++++
+ rpmio/digest_openssl.c   |  6 ++++++
+ 5 files changed, 30 insertions(+), 8 deletions(-)
+
+diff --git a/include/rpm/rpmcrypto.h b/include/rpm/rpmcrypto.h
+index 69d329f37..d8e31a222 100644
+--- a/include/rpm/rpmcrypto.h
++++ b/include/rpm/rpmcrypto.h
+@@ -23,10 +23,13 @@ typedef enum rpmHashAlgo_e {
+     RPM_HASH_MD2		=  5,	/*!< MD2 */
+     RPM_HASH_TIGER192		=  6,	/*!< TIGER192 */
+     RPM_HASH_HAVAL_5_160	=  7,	/*!< HAVAL-5-160 */
+-    RPM_HASH_SHA256		=  8,	/*!< SHA256 */
+-    RPM_HASH_SHA384		=  9,	/*!< SHA384 */
+-    RPM_HASH_SHA512		= 10,	/*!< SHA512 */
+-    RPM_HASH_SHA224		= 11,	/*!< SHA224 */
++    RPM_HASH_SHA256		=  8,	/*!< SHA2-256 */
++    RPM_HASH_SHA384		=  9,	/*!< SHA2-384 */
++    RPM_HASH_SHA512		= 10,	/*!< SHA2-512 */
++    RPM_HASH_SHA224		= 11,	/*!< SHA2-224 */
++    RPM_HASH_SHA3_256		= 12,	/*!< SHA3-256 */
++					/*!< reserved */
++    RPM_HASH_SHA3_512		= 14,	/*!< SHA3-512 */
+ } rpmHashAlgo;
+ 
+ /** \ingroup rpmcrypto
+diff --git a/include/rpm/rpmpgp.h b/include/rpm/rpmpgp.h
+index a7eecbebf..1f356f412 100644
+--- a/include/rpm/rpmpgp.h
++++ b/include/rpm/rpmpgp.h
+@@ -266,10 +266,13 @@ typedef enum pgpHashAlgo_e {
+     PGPHASHALGO_MD2		=  5,	/*!< MD2 */
+     PGPHASHALGO_TIGER192	=  6,	/*!< TIGER192 */
+     PGPHASHALGO_HAVAL_5_160	=  7,	/*!< HAVAL-5-160 */
+-    PGPHASHALGO_SHA256		=  8,	/*!< SHA256 */
+-    PGPHASHALGO_SHA384		=  9,	/*!< SHA384 */
+-    PGPHASHALGO_SHA512		= 10,	/*!< SHA512 */
+-    PGPHASHALGO_SHA224		= 11,	/*!< SHA224 */
++    PGPHASHALGO_SHA256		=  8,	/*!< SHA2-256 */
++    PGPHASHALGO_SHA384		=  9,	/*!< SHA2-384 */
++    PGPHASHALGO_SHA512		= 10,	/*!< SHA2-512 */
++    PGPHASHALGO_SHA224		= 11,	/*!< SHA2-224 */
++    PGPHASHALGO_SHA3_256	= 12,	/*!< SHA3-256 */
++					/*!< 13 reserved */
++    PGPHASHALGO_SHA3_512	= 14,	/*!< SHA3-256 */
+ } pgpHashAlgo;
+ 
+ /** \ingroup rpmpgp
+diff --git a/macros.in b/macros.in
+index 8240e9613..5534f1ed7 100644
+--- a/macros.in
++++ b/macros.in
+@@ -391,6 +391,8 @@ Supplements:   (%{name} = %{version}-%{release} and langpacks-%{1})\
+ #	8	SHA256 (default)
+ #	9	SHA384
+ #	10	SHA512
++#	12	SHA3-256
++#	14	SHA3-512
+ #
+ %_source_filedigest_algorithm	8
+ %_binary_filedigest_algorithm	8
+diff --git a/rpmio/digest_libgcrypt.c b/rpmio/digest_libgcrypt.c
+index 1e815416d..07103cf18 100644
+--- a/rpmio/digest_libgcrypt.c
++++ b/rpmio/digest_libgcrypt.c
+@@ -46,6 +46,10 @@ size_t rpmDigestLength(int hashalgo)
+ 	return 48;
+     case RPM_HASH_SHA512:
+ 	return 64;
++    case RPM_HASH_SHA3_256:
++	return 32;
++    case RPM_HASH_SHA3_512:
++	return 64;
+     default:
+ 	return 0;
+     }
+@@ -66,6 +70,10 @@ static int hashalgo2gcryalgo(int hashalgo)
+ 	return GCRY_MD_SHA384;
+     case RPM_HASH_SHA512:
+ 	return GCRY_MD_SHA512;
++    case RPM_HASH_SHA3_256:
++	return GCRY_MD_SHA3_256;
++    case RPM_HASH_SHA3_512:
++	return GCRY_MD_SHA3_512;
+     default:
+ 	return 0;
+     }
+diff --git a/rpmio/digest_openssl.c b/rpmio/digest_openssl.c
+index f8b12df93..8867441d0 100644
+--- a/rpmio/digest_openssl.c
++++ b/rpmio/digest_openssl.c
+@@ -72,6 +72,12 @@ static const EVP_MD *getEVPMD(int hashalgo)
+     case RPM_HASH_SHA224:
+         return EVP_sha224();
+ 
++    case RPM_HASH_SHA3_256:
++        return EVP_sha3_256();
++
++    case RPM_HASH_SHA3_512:
++        return EVP_sha3_512();
++
+     default:
+         return EVP_md_null();
+     }
+-- 
+2.50.1
+
+
+From 3b172765d35ebab9333665daade71aba72a267d2 Mon Sep 17 00:00:00 2001
+From: Panu Matilainen <pmatilai@redhat.com>
+Date: Tue, 11 Mar 2025 17:16:19 +0200
+Subject: [PATCH 2/8] Fix OpenPGP packet (tag 17) name & description
+
+PGPTAG_PHOTOID is some early PGP-era legacy name for it, RFC-4880
+already calls it "User attribute packet".
+
+(cherry picked from commit e07341097f0b8361712fe3aafb59ac1f3e7af25d)
+---
+ include/rpm/rpmpgp.h | 4 +++-
+ rpmio/rpmpgpval.h    | 2 +-
+ 2 files changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/include/rpm/rpmpgp.h b/include/rpm/rpmpgp.h
+index 1f356f412..6d07d0a17 100644
+--- a/include/rpm/rpmpgp.h
++++ b/include/rpm/rpmpgp.h
+@@ -62,7 +62,7 @@ typedef enum pgpTag_e {
+     PGPTAG_USER_ID		= 13, /*!< User ID */
+     PGPTAG_PUBLIC_SUBKEY	= 14, /*!< Public Subkey */
+     PGPTAG_COMMENT_OLD		= 16, /*!< Comment (from OpenPGP draft) */
+-    PGPTAG_PHOTOID		= 17, /*!< PGP's photo ID */
++    PGPTAG_USER_ATTRIBUTE	= 17, /*!< User Attribute packet */
+     PGPTAG_ENCRYPTED_MDC	= 18, /*!< Integrity protected encrypted data */
+     PGPTAG_MDC			= 19, /*!< Manipulaion detection code packet */
+     PGPTAG_PRIVATE_60		= 60, /*!< Private or Experimental Values */
+@@ -71,6 +71,8 @@ typedef enum pgpTag_e {
+     PGPTAG_CONTROL		= 63  /*!< Control (GPG) */
+ } pgpTag;
+ 
++#define PGPTAG_PHOTOID PGPTAG_USER_ATTRIBUTE /* legacy name */
++
+ /** \ingroup rpmpgp
+  * 5.1. Public-Key Encrypted Session Key Packets (Tag 1)
+  *
+diff --git a/rpmio/rpmpgpval.h b/rpmio/rpmpgpval.h
+index ad8ed08e2..037db075e 100644
+--- a/rpmio/rpmpgpval.h
++++ b/rpmio/rpmpgpval.h
+@@ -140,7 +140,7 @@ static struct pgpValTbl_s const pgpTagTbl[] = {
+     { PGPTAG_USER_ID,		"User ID" },
+     { PGPTAG_PUBLIC_SUBKEY,	"Public Subkey" },
+     { PGPTAG_COMMENT_OLD,	"Comment (from OpenPGP draft)" },
+-    { PGPTAG_PHOTOID,		"PGP's photo ID" },
++    { PGPTAG_USER_ATTRIBUTE,	"User Attribute" },
+     { PGPTAG_ENCRYPTED_MDC,	"Integrity protected encrypted data" },
+     { PGPTAG_MDC,		"Manipulaion detection code packet" },
+     { PGPTAG_PRIVATE_60,	"Private #60" },
+-- 
+2.50.1
+
+
+From e2bd1fbdaee9533ccee20a901fa11adf21155e82 Mon Sep 17 00:00:00 2001
+From: Panu Matilainen <pmatilai@redhat.com>
+Date: Tue, 11 Mar 2025 14:57:57 +0200
+Subject: [PATCH 3/8] Add new tag and algorithm ID's and descriptions from
+ RFC-9580
+
+While most of the details are handled by rpm-sequoia, rpm needs to know
+at least the algorithm id's. Add the other tags while at it, it's not
+much anyhow.
+
+Also add the SHA3 description texts that were missing from
+9344367edf654fb41a136793b68cea9abb892fb9
+
+There's no way to test this stuff at this point though, we need to
+wait until sequoia-pgp 2.0 and a compatible rpm-sequoia. OTOH some
+implementations might need these symbols in place.
+
+Fixes: #3631
+(backported from commit c2f760188421351f5ac38ec6e18c3eb4daf2e750)
+---
+ include/rpm/rpmpgp.h | 15 +++++++++++++--
+ rpmio/rpmpgpval.h    | 13 +++++++++++++
+ 2 files changed, 26 insertions(+), 2 deletions(-)
+
+diff --git a/include/rpm/rpmpgp.h b/include/rpm/rpmpgp.h
+index 6d07d0a17..92f10e11d 100644
+--- a/include/rpm/rpmpgp.h
++++ b/include/rpm/rpmpgp.h
+@@ -65,6 +65,7 @@ typedef enum pgpTag_e {
+     PGPTAG_USER_ATTRIBUTE	= 17, /*!< User Attribute packet */
+     PGPTAG_ENCRYPTED_MDC	= 18, /*!< Integrity protected encrypted data */
+     PGPTAG_MDC			= 19, /*!< Manipulaion detection code packet */
++    PGPTAG_PADDING		= 21, /*!< Padding packet */
+     PGPTAG_PRIVATE_60		= 60, /*!< Private or Experimental Values */
+     PGPTAG_COMMENT		= 61, /*!< Comment */
+     PGPTAG_PRIVATE_62		= 62, /*!< Private or Experimental Values */
+@@ -137,7 +138,8 @@ typedef enum pgpSigType_e {
+     PGPSIGTYPE_KEY_REVOKE	 = 0x20, /*!< Key revocation */
+     PGPSIGTYPE_SUBKEY_REVOKE	 = 0x28, /*!< Subkey revocation */
+     PGPSIGTYPE_CERT_REVOKE	 = 0x30, /*!< Certification revocation */
+-    PGPSIGTYPE_TIMESTAMP	 = 0x40  /*!< Timestamp */
++    PGPSIGTYPE_TIMESTAMP	 = 0x40, /*!< Timestamp */
++    PGPSIGTYPE_THIRD_PARTY	 = 0x50, /*!< Third-Party Confirmation */
+ } pgpSigType;
+ 
+ /** \ingroup rpmpgp
+@@ -174,7 +176,11 @@ typedef enum pgpPubkeyAlgo_e {
+     PGPPUBKEYALGO_ECDSA		= 19,	/*!< ECDSA */
+     PGPPUBKEYALGO_ELGAMAL	= 20,	/*!< Elgamal */
+     PGPPUBKEYALGO_DH		= 21,	/*!< Diffie-Hellman (X9.42) */
+-    PGPPUBKEYALGO_EDDSA		= 22	/*!< EdDSA */
++    PGPPUBKEYALGO_EDDSA		= 22,	/*!< EdDSA */
++    PGPPUBKEYALGO_X25519	= 25,	/*!< X25519 */
++    PGPPUBKEYALGO_X448		= 26,	/*!< X448 */
++    PGPPUBKEYALGO_ED25519	= 27,	/*!< Ed25519 */
++    PGPPUBKEYALGO_ED448		= 28,	/*!< Ed448 */
+ } pgpPubkeyAlgo;
+ 
+ /** \ingroup rpmpgp
+@@ -213,6 +219,9 @@ typedef enum pgpSymkeyAlgo_e {
+     PGPSYMKEYALGO_AES_192	=  8,	/*!< AES(192-bit key) */
+     PGPSYMKEYALGO_AES_256	=  9,	/*!< AES(256-bit key) */
+     PGPSYMKEYALGO_TWOFISH	= 10,	/*!< TWOFISH(256-bit key) */
++    PGPSYMKEYALGO_CAMELLIA_128	= 11,	/*!< Camellia with 128-bit */
++    PGPSYMKEYALGO_CAMELLIA_192	= 12,	/*!< Camellia with 192-bit */
++    PGPSYMKEYALGO_CAMELLIA_256	= 13,	/*!< Camellia with 256-bit */
+     PGPSYMKEYALGO_NOENCRYPT	= 110	/*!< no encryption */
+ } pgpSymkeyAlgo;
+ 
+@@ -445,6 +454,8 @@ typedef enum pgpSubType_e {
+     PGPSUBTYPE_REVOKE_REASON	=  29, /*!< reason for revocation */
+     PGPSUBTYPE_FEATURES		=  30, /*!< feature flags (gpg) */
+     PGPSUBTYPE_EMBEDDED_SIG	=  32, /*!< embedded signature (gpg) */
++    PGPSUBTYPE_INTREC_FINGERPRINT= 35, /*!< intended recipient fingerprint */
++    PGPSUBTYPE_PFERER_AEAD	= 39,  /*!<  preferred AEAD ciphercuites */
+ 
+     PGPSUBTYPE_INTERNAL_100	= 100, /*!< internal or user-defined */
+     PGPSUBTYPE_INTERNAL_101	= 101, /*!< internal or user-defined */
+diff --git a/rpmio/rpmpgpval.h b/rpmio/rpmpgpval.h
+index 037db075e..2b139c2f3 100644
+--- a/rpmio/rpmpgpval.h
++++ b/rpmio/rpmpgpval.h
+@@ -25,6 +25,7 @@ static struct pgpValTbl_s const pgpSigTypeTbl[] = {
+     { PGPSIGTYPE_SUBKEY_REVOKE,	"Subkey revocation signature" },
+     { PGPSIGTYPE_CERT_REVOKE,	"Certification revocation signature" },
+     { PGPSIGTYPE_TIMESTAMP,	"Timestamp signature" },
++    { PGPSIGTYPE_THIRD_PARTY,	"Third-Party Confirmation signature" },
+     { -1,			"Unknown signature type" },
+ };
+ 
+@@ -39,6 +40,10 @@ static struct pgpValTbl_s const pgpPubkeyTbl[] = {
+     { PGPPUBKEYALGO_ELGAMAL,	"Elgamal" },
+     { PGPPUBKEYALGO_DH,		"Diffie-Hellman (X9.42)" },
+     { PGPPUBKEYALGO_EDDSA,	"EdDSA" },
++    { PGPPUBKEYALGO_X25519,	"X25519" },
++    { PGPPUBKEYALGO_X448,	"X448" },
++    { PGPPUBKEYALGO_ED25519,	"Ed25519" },
++    { PGPPUBKEYALGO_ED448,	"Ed448" },
+     { -1,			"Unknown public key algorithm" },
+ };
+ 
+@@ -54,6 +59,9 @@ static struct pgpValTbl_s const pgpSymkeyTbl[] = {
+     { PGPSYMKEYALGO_AES_192,	"AES(192-bit key)" },
+     { PGPSYMKEYALGO_AES_256,	"AES(256-bit key)" },
+     { PGPSYMKEYALGO_TWOFISH,	"TWOFISH(256-bit key)" },
++    { PGPSYMKEYALGO_CAMELLIA_128,"Camellia(128-bit key)" },
++    { PGPSYMKEYALGO_CAMELLIA_192,"Camellia(192-bit key)" },
++    { PGPSYMKEYALGO_CAMELLIA_256,"Camellia(256-bit key)" },
+     { PGPSYMKEYALGO_NOENCRYPT,	"no encryption" },
+     { -1,			"Unknown symmetric key algorithm" },
+ };
+@@ -77,6 +85,8 @@ static struct pgpValTbl_s const pgpHashTbl[] = {
+     { PGPHASHALGO_SHA384,	"SHA384" },
+     { PGPHASHALGO_SHA512,	"SHA512" },
+     { PGPHASHALGO_SHA224,	"SHA224" },
++    { PGPHASHALGO_SHA3_256,	"SHA3-256" },
++    { PGPHASHALGO_SHA3_512,	"SHA3-512" },
+     { -1,			"Unknown hash algorithm" },
+ };
+ 
+@@ -109,6 +119,8 @@ static struct pgpValTbl_s const pgpSubTypeTbl[] = {
+     { PGPSUBTYPE_REVOKE_REASON,	"reason for revocation" },
+     { PGPSUBTYPE_FEATURES,	"features" },
+     { PGPSUBTYPE_EMBEDDED_SIG,	"embedded signature" },
++    { PGPSUBTYPE_INTREC_FINGERPRINT,"intended recipient fingerprint" },
++    { PGPSUBTYPE_PFERER_AEAD,	"preferred AEAD ciphersuites" },
+ 
+     { PGPSUBTYPE_INTERNAL_100,	"internal subpkt type 100" },
+     { PGPSUBTYPE_INTERNAL_101,	"internal subpkt type 101" },
+@@ -143,6 +155,7 @@ static struct pgpValTbl_s const pgpTagTbl[] = {
+     { PGPTAG_USER_ATTRIBUTE,	"User Attribute" },
+     { PGPTAG_ENCRYPTED_MDC,	"Integrity protected encrypted data" },
+     { PGPTAG_MDC,		"Manipulaion detection code packet" },
++    { PGPTAG_PADDING,		"Padding" },
+     { PGPTAG_PRIVATE_60,	"Private #60" },
+     { PGPTAG_COMMENT,		"Comment" },
+     { PGPTAG_PRIVATE_62,	"Private #62" },
+-- 
+2.50.1
+
+
+From 31fbcaebaac0ad4e3b863813833156d4e4d4b470 Mon Sep 17 00:00:00 2001
+From: Panu Matilainen <pmatilai@redhat.com>
+Date: Wed, 25 Jun 2025 13:32:49 +0300
+Subject: [PATCH 4/8] Add algorithm ID's for PQC public key algorithms from the
+ current draft
+
+PQC in OpenPGP is still just a draft [*], but these have been assigned and
+unchanged since November 2024. If they change, the worst that can happen is
+we show an incorrect string as the algorithm identification, rpm doesn't
+use them in any other way. In the meanwhile, this lets us get meaningful
+output when testing PQC stuff.
+
+[*] https://github.com/openpgp-pqc/draft-openpgp-pqc/blob/main/draft-ietf-openpgp-pqc.md
+
+Fixes: #3632
+(cherry picked from commit 2659fb1fbcea28b703116e7de6a211729869cba6)
+---
+ include/rpm/rpmpgp.h | 7 +++++++
+ rpmio/rpmpgpval.h    | 7 +++++++
+ 2 files changed, 14 insertions(+)
+
+diff --git a/include/rpm/rpmpgp.h b/include/rpm/rpmpgp.h
+index 92f10e11d..052fdb54a 100644
+--- a/include/rpm/rpmpgp.h
++++ b/include/rpm/rpmpgp.h
+@@ -181,6 +181,13 @@ typedef enum pgpPubkeyAlgo_e {
+     PGPPUBKEYALGO_X448		= 26,	/*!< X448 */
+     PGPPUBKEYALGO_ED25519	= 27,	/*!< Ed25519 */
+     PGPPUBKEYALGO_ED448		= 28,	/*!< Ed448 */
++    PGPPUBKEYALGO_ML_DSA65_ED25519	= 30, /*!< ML-DSA-65+Ed25519 */
++    PGPPUBKEYALGO_ML_DSA87_ED448	= 31, /*!< ML-DSA-87+Ed448 */
++    PGPPUBKEYALGO_SLH_DSA_SHAKE_128S	= 32, /*!< SLH-DSA-SHAKE-128s */
++    PGPPUBKEYALGO_SLH_DSA_SHAKE_128F	= 33, /*!< SLH-DSA-SHAKE-128f */
++    PGPPUBKEYALGO_SLH_DSA_SHAKE_256S	= 34, /*!< SLH-DSA-SHAKE-256s */
++    PGPPUBKEYALGO_ML_KEM768_X25519 	= 35, /*!< ML-KEM-768+X25519 */
++    PGPPUBKEYALGO_ML_KEM1024_X448 	= 36, /*!< ML-KEM-1024+X448 */
+ } pgpPubkeyAlgo;
+ 
+ /** \ingroup rpmpgp
+diff --git a/rpmio/rpmpgpval.h b/rpmio/rpmpgpval.h
+index 2b139c2f3..1f9429851 100644
+--- a/rpmio/rpmpgpval.h
++++ b/rpmio/rpmpgpval.h
+@@ -44,6 +44,13 @@ static struct pgpValTbl_s const pgpPubkeyTbl[] = {
+     { PGPPUBKEYALGO_X448,	"X448" },
+     { PGPPUBKEYALGO_ED25519,	"Ed25519" },
+     { PGPPUBKEYALGO_ED448,	"Ed448" },
++    { PGPPUBKEYALGO_ML_DSA65_ED25519,	"ML-DSA-65+Ed25519" },
++    { PGPPUBKEYALGO_ML_DSA87_ED448,	"ML-DSA-87+Ed448" },
++    { PGPPUBKEYALGO_SLH_DSA_SHAKE_128S,	"SLH-DSA-SHAKE-128s" },
++    { PGPPUBKEYALGO_SLH_DSA_SHAKE_128F,	"SLH-DSA-SHAKE-128f" },
++    { PGPPUBKEYALGO_SLH_DSA_SHAKE_256S,	"SLH-DSA-SHAKE-256s" },
++    { PGPPUBKEYALGO_ML_KEM768_X25519,	"ML-KEM-768+X25519" },
++    { PGPPUBKEYALGO_ML_KEM1024_X448,	"ML-KEM-1024+X448" },
+     { -1,			"Unknown public key algorithm" },
+ };
+ 
+-- 
+2.50.1
+
+
+From c4d7e3f95800af8a8765df542804b8481b540253 Mon Sep 17 00:00:00 2001
+From: Panu Matilainen <pmatilai@redhat.com>
+Date: Tue, 1 Jul 2025 11:48:12 +0300
+Subject: [PATCH 5/8] Support updating individual IDs in a digest bundle
+
+Up to now, rpm digest bundles have only needed to support data from a
+single stream - just covering different ranges and algorithms. But
+OpenPGP v6 signature salt is a random per-signature thing that we need
+to feed into the digest before the actual data, so we need to be able to
+update each ID in a bundle individually too.
+
+Luckily this is easy to do. Add a small test-program to exercise it,
+we can't yet actually use it for testing a real-world V6 scenario
+anyway.
+
+Fixes: #3845
+(backported from commit 28e4f05c71202b2614619e9d9a51af9443014f34)
+---
+ include/rpm/rpmcrypto.h | 11 +++++++++++
+ rpmio/digest.c          | 13 +++++++++++++
+ 2 files changed, 24 insertions(+)
+
+diff --git a/include/rpm/rpmcrypto.h b/include/rpm/rpmcrypto.h
+index d8e31a222..e9ab646fc 100644
+--- a/include/rpm/rpmcrypto.h
++++ b/include/rpm/rpmcrypto.h
+@@ -144,6 +144,17 @@ int rpmDigestBundleAddID(rpmDigestBundle bundle, int algo, int id,
+  */
+ int rpmDigestBundleUpdate(rpmDigestBundle bundle, const void *data, size_t len);
+ 
++/** \ingroup rpmcrypto
++ * Update context of an individual ID within bundle with next plain text buffer.
++ * @param bundle	digest bundle
++ * @param id		id of digest (arbitrary, must be > 0)
++ * @param data		next data buffer
++ * @param len		no. bytes of data
++ * @return		0 on success
++ */
++int rpmDigestBundleUpdateID(rpmDigestBundle bundle, int id,
++			const void *data, size_t len);
++
+ /** \ingroup rpmcrypto
+  * Return digest from a bundle and destroy context, see rpmDigestFinal().
+  *
+diff --git a/rpmio/digest.c b/rpmio/digest.c
+index e60d171d7..ed1f318fa 100644
+--- a/rpmio/digest.c
++++ b/rpmio/digest.c
+@@ -91,6 +91,19 @@ int rpmDigestBundleUpdate(rpmDigestBundle bundle, const void *data, size_t len)
+     return rc;
+ }
+ 
++int rpmDigestBundleUpdateID(rpmDigestBundle bundle, int id,
++			    const void *data, size_t len)
++{
++    int rc = -1;
++    int ix = -1;
++
++    if (bundle && data && len > 0 && id > 0) {
++	ix = findID(bundle, id);
++	if (ix >= 0)
++	    rc = rpmDigestUpdate(bundle->digests[ix], data, len);
++    }
++    return rc;
++}
+ int rpmDigestBundleFinal(rpmDigestBundle bundle, int id,
+ 			 void ** datap, size_t * lenp, int asAscii)
+ {
+-- 
+2.50.1
+
+
+From db4704ea3b47f5e38ad1606a8c3cfe27059b084f Mon Sep 17 00:00:00 2001
+From: Panu Matilainen <pmatilai@redhat.com>
+Date: Tue, 1 Jul 2025 12:15:03 +0300
+Subject: [PATCH 6/8] Support OpenPGP v6 signature pre-salting
+
+OpenPGP v6 signature salt is a random per-signature thing that we need
+to feed into the digest before the actual data. For that we need
+rpm-sequoia support, the first version to have it is 1.9.0.
+
+The tests for this are already written, just need to be adjusted a bit
+and uncommented, so do that. Kudos to Jakub for covering this part via
+PR #3844 (squashed into this commit)!
+
+Co-authored-by: Jakub Jelen <jjelen@redhat.com>
+
+Fixes: #3846
+(backported from commit c36c717f41683953b9c23e447a8df0d0ac7c845c)
+---
+ INSTALL                |  2 +-
+ include/rpm/rpmpgp.h   |  2 ++
+ lib/rpmvs.c            | 14 ++++++++++++--
+ rpmio/CMakeLists.txt   |  2 +-
+ rpmio/rpmpgp_sequoia.c |  3 +++
+ 5 files changed, 19 insertions(+), 4 deletions(-)
+
+diff --git a/INSTALL b/INSTALL
+index 0a86822b0..82c91d5b0 100644
+--- a/INSTALL
++++ b/INSTALL
+@@ -28,7 +28,7 @@ The source for the file utility + library is available from
+ 
+ You will need a cryptographic library to support digests and
+ signatures. This depends on the OpenPGP parser used: the default is
+-rpm-sequoia library (>= 1.3.0 required), which is available from
++rpm-sequoia library (>= 1.9.0 required), which is available from
+     https://github.com/rpm-software-management/rpm-sequoia
+ 
+ Use of rpm-sequoia is strongly recommended. Most importantly, the internal
+diff --git a/include/rpm/rpmpgp.h b/include/rpm/rpmpgp.h
+index 052fdb54a..1076eecbd 100644
+--- a/include/rpm/rpmpgp.h
++++ b/include/rpm/rpmpgp.h
+@@ -1205,6 +1205,8 @@ int pgpDigParamsVersion(pgpDigParams digp);
+  */
+ uint32_t pgpDigParamsCreationTime(pgpDigParams digp);
+ 
++int pgpDigParamsSalt(pgpDigParams digp, const uint8_t **datap, size_t *lenp);
++
+ /** \ingroup rpmpgp
+  * Destroy parsed OpenPGP packet parameter(s).
+  * @param digp		parameter container
+diff --git a/lib/rpmvs.c b/lib/rpmvs.c
+index e22051a92..3d6227330 100644
+--- a/lib/rpmvs.c
++++ b/lib/rpmvs.c
+@@ -424,8 +424,18 @@ void rpmvsInitRange(struct rpmvs_s *sis, int range)
+     for (int i = 0; i < sis->nsigs; i++) {
+ 	struct rpmsinfo_s *sinfo = &sis->sigs[i];
+ 	if (sinfo->range & range) {
+-	    if (sinfo->rc == RPMRC_OK)
+-		rpmDigestBundleAddID(sis->bundle, sinfo->hashalgo, sinfo->id, 0);
++	    if (sinfo->rc != RPMRC_OK)
++		continue;
++
++	    rpmDigestBundleAddID(sis->bundle, sinfo->hashalgo, sinfo->id, 0);
++	    /* OpenPGP v6 signatures need a grain of salt to go */
++	    if (sinfo->sig) {
++		const uint8_t *salt = NULL;
++		size_t slen = 0;
++		if (pgpDigParamsSalt(sinfo->sig, &salt, &slen) == 0 && salt) {
++		    rpmDigestBundleUpdateID(sis->bundle, sinfo->id, salt, slen);
++		}
++	    }
+ 	}
+     }
+ }
+diff --git a/rpmio/CMakeLists.txt b/rpmio/CMakeLists.txt
+index aec48966c..1017b2e09 100644
+--- a/rpmio/CMakeLists.txt
++++ b/rpmio/CMakeLists.txt
+@@ -15,7 +15,7 @@ target_include_directories(librpmio PRIVATE
+ 
+ 
+ if (WITH_SEQUOIA)
+-	pkg_check_modules(RPMSEQUOIA REQUIRED IMPORTED_TARGET rpm-sequoia>=1.8.0)
++	pkg_check_modules(RPMSEQUOIA REQUIRED IMPORTED_TARGET rpm-sequoia>=1.9.0)
+ 	target_sources(librpmio PRIVATE rpmpgp_sequoia.c)
+ 	target_link_libraries(librpmio PRIVATE PkgConfig::RPMSEQUOIA)
+ else()
+diff --git a/rpmio/rpmpgp_sequoia.c b/rpmio/rpmpgp_sequoia.c
+index d0b673953..07b7bbffe 100644
+--- a/rpmio/rpmpgp_sequoia.c
++++ b/rpmio/rpmpgp_sequoia.c
+@@ -33,6 +33,9 @@ W(const uint8_t *, pgpDigParamsSignID, (pgpDigParams digp), (digp))
+ W(const char *, pgpDigParamsUserID, (pgpDigParams digp), (digp))
+ W(int, pgpDigParamsVersion, (pgpDigParams digp), (digp))
+ W(uint32_t, pgpDigParamsCreationTime, (pgpDigParams digp), (digp))
++W(int, pgpDigParamsSalt,
++  (pgpDigParams digp, const uint8_t **datap, size_t *lenp),
++  (digp, datap, lenp))
+ W(rpmRC, pgpVerifySignature,
+   (pgpDigParams key, pgpDigParams sig, DIGEST_CTX hashctx),
+   (key, sig, hashctx))
+-- 
+2.50.1
+
+
+From c47dc0c4604a20ede996e93650ba9290c26d9909 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Petr=20P=C3=ADsa=C5=99?= <ppisar@redhat.com>
+Date: Fri, 4 Apr 2025 16:59:41 +0200
+Subject: [PATCH 7/8] Return -1 from fdSize() for non-regular files
+
+I noticed that importing a key from a pipe did not work:
+
+    $ cat /tmp/key | rpmkeys --import -
+    error: -: import read failed(0).
+
+While importing from a regular file on stdin worked:
+
+    $ < /tmp/key rpmkeys --import -
+
+The cause was fdSize() returning 0 for a pipe descriptor.
+rpmcliImportPubkeys() calls rpmioSlurp() which calls fdSize() like
+this:
+
+    size = fdSize(fd);
+    blen = (size >= 0 ? size : blenmax);
+    if (blen) {
+    	/* read from the descriptor */
+    }
+
+As a result, rpmioSlurp() concluded that the "file" was empty and
+rpmcliImportPubkeys() reported an error:
+
+    iorc = rpmioSlurp(fn, &buf, &blen);
+    if (iorc || buf == NULL || blen < 64) {
+        rpmlog(RPMLOG_ERR, _("%s: import read failed(%d).\n"), fn, iorc);
+
+This patch changes fdSize() to return an error for non-regular files.
+This is in line with fstat(3) manual:
+
+       st_size
+              This field gives the size of the file (if it is
+              a regular file or a symbolic link)  in bytes.  The size
+              of a symbolic link is the length of the pathname it
+              contains, without a terminating null byte.
+
+Returning an error on unsupported descriptors was pretty common before
+commit 852398f8c6dcb4ad5ed0310e49e7d342a262be91
+("Lose unnecessary url type checking from fdSize()").
+
+(cherry picked from commit 063427c5f72e1cb50a61cb0973be127a00e93c2c)
+---
+ rpmio/rpmio.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/rpmio/rpmio.c b/rpmio/rpmio.c
+index 6069274a7..a8fdd00b9 100644
+--- a/rpmio/rpmio.c
++++ b/rpmio/rpmio.c
+@@ -248,7 +248,7 @@ off_t fdSize(FD_t fd)
+     struct stat sb;
+     off_t rc = -1; 
+ 
+-    if (fd != NULL && fstat(Fileno(fd), &sb) == 0)
++    if (fd != NULL && fstat(Fileno(fd), &sb) == 0 && S_ISREG(sb.st_mode))
+ 	rc = sb.st_size;
+     return rc;
+ }
+-- 
+2.50.1
+
+
+From 70de5d8eb66925a59dafaf53fdef2a5dc8afa860 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Petr=20P=C3=ADsa=C5=99?= <ppisar@redhat.com>
+Date: Fri, 4 Apr 2025 17:32:05 +0200
+Subject: [PATCH 8/8] Handle fdSize() failure in rpmSign()
+
+This mistake existed before "Return -1 from fdSize() for non-regular
+files" commit. The computed offsets could reach negative values.
+
+(cherry picked from commit 0ecca60d56f163d591a97e9f216573d3c3d5ef7f)
+---
+ sign/rpmgensig.c | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/sign/rpmgensig.c b/sign/rpmgensig.c
+index a96bf7ed0..4596b5116 100644
+--- a/sign/rpmgensig.c
++++ b/sign/rpmgensig.c
+@@ -647,6 +647,7 @@ static int rpmSign(const char *rpm, int deleting, int flags)
+     int res = -1; /* assume failure */
+     rpmRC rc;
+     struct rpmtd_s utd;
++    off_t fileSize;
+     off_t headerStart;
+     off_t sigStart;
+     struct sigTarget_s sigt_v3;
+@@ -734,11 +735,16 @@ static int rpmSign(const char *rpm, int deleting, int flags)
+     } else if (deleting) {	/* Nuke all the signature tags. */
+ 	deleteSigs(sigh);
+     } else {
++	fileSize = fdSize(fd);
++	if (fileSize < 0) {
++	    rpmlog(RPMLOG_ERR, _("Could not get a file size of %s\n"), rpm);
++	    goto exit;
++	}
+ 	/* Signature target containing header + payload */
+ 	sigt_v3.fd = fd;
+ 	sigt_v3.start = headerStart;
+ 	sigt_v3.fileName = rpm;
+-	sigt_v3.size = fdSize(fd) - headerStart;
++	sigt_v3.size = fileSize - headerStart;
+ 
+ 	/* Signature target containing only header */
+ 	sigt_v4 = sigt_v3;
+-- 
+2.50.1
+

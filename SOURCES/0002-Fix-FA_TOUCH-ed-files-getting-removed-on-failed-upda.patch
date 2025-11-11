@@ -1,0 +1,121 @@
+From 5ae6dd32ea4b755a354facb54d5cecbdcf3df25a Mon Sep 17 00:00:00 2001
+From: Panu Matilainen <pmatilai@redhat.com>
+Date: Fri, 18 Oct 2024 14:50:35 +0300
+Subject: [PATCH 2/2] Fix FA_TOUCH'ed files getting removed on failed update
+
+On install/update, most files are laid down with a temporary suffix
+and if the update fails, removing those at the end of the loop is
+the right thing to do. However FA_TOUCH'ed files were already there,
+we only update their metadata, and we better not remove them!
+
+AFAICS this all versions since rpm >= 4.14 in one way or the other.
+If %_minimize_writes is enabled then it affects way more than just
+unmodified config files.
+
+The test is a simplified version of pam update failing in the original
+report. Technically, --nomtime should not be needed for the test
+verification but we don't even try to restore the metadata on failure,
+and fixing that is way out of scope here.
+
+Backported from commits:
+027ef640b33b38ca257bb301bb302e9c71d43c27
+
+Fixes: RHEL-54386
+---
+ lib/fsm.c                       |  2 +-
+ tests/data/SPECS/pamupdate.spec | 21 +++++++++++++++++
+ tests/rpmi.at                   | 40 +++++++++++++++++++++++++++++++++
+ 3 files changed, 62 insertions(+), 1 deletion(-)
+ create mode 100644 tests/data/SPECS/pamupdate.spec
+
+diff --git a/lib/fsm.c b/lib/fsm.c
+index 5e073ce22..19f28cade 100644
+--- a/lib/fsm.c
++++ b/lib/fsm.c
+@@ -1094,7 +1094,7 @@ setmeta:
+ 	    if (ensureDir(NULL, rpmfiDN(fi), 0, 0, 1, &di.dirfd))
+ 		continue;
+ 
+-	    if (fp->stage > FILE_NONE && !fp->skip) {
++	    if (fp->stage > FILE_NONE && !fp->skip && fp->action != FA_TOUCH) {
+ 		(void) fsmRemove(di.dirfd, fp->fpath, fp->sb.st_mode);
+ 	    }
+ 	}
+diff --git a/tests/data/SPECS/pamupdate.spec b/tests/data/SPECS/pamupdate.spec
+new file mode 100644
+index 000000000..a458b9b73
+--- /dev/null
++++ b/tests/data/SPECS/pamupdate.spec
+@@ -0,0 +1,21 @@
++Name: pamupdate
++Version: 1.0
++Release: %{rel}
++Group: Testing
++License: Public domain
++Summary: Test config behavior on update failure
++BuildArch: noarch
++
++%description
++%{summary}
++
++%install
++mkdir -p ${RPM_BUILD_ROOT}/etc
++echo AAAA > ${RPM_BUILD_ROOT}/etc/my.conf
++echo BBBB > ${RPM_BUILD_ROOT}/etc/your.conf
++mkdir -p ${RPM_BUILD_ROOT}/var/run/faillock
++
++%files
++%config /etc/my.conf
++%config /etc/your.conf
++%dir /var/run/faillock
+diff --git a/tests/rpmi.at b/tests/rpmi.at
+index ae8b24437..804123b1a 100644
+--- a/tests/rpmi.at
++++ b/tests/rpmi.at
+@@ -1560,3 +1560,43 @@ error: unpacking of archive failed on file /opt/foo;6553448f: cpio: Unsafe symli
+ error: replacetest-1.0-1.noarch: install failed
+ ])
+ RPMTEST_CLEANUP
++
++AT_SETUP([update on invalid symlinked directory])
++AT_KEYWORDS([install update symlink])
++RPMDB_INIT
++
++RPMTEST_CHECK([
++for r in 1 2; do
++    runroot rpmbuild --quiet --bb \
++		--define "rel ${r}" \
++		/data/SPECS/pamupdate.spec
++done
++],
++[0],
++[],
++[])
++
++RPMTEST_CHECK([
++runroot rpm -U /build/RPMS/noarch/pamupdate-1.0-1.noarch.rpm
++runroot rpm -V pamupdate
++],
++[0],
++[],
++[])
++
++RPMTEST_CHECK([
++runroot_other chown -h nobody:nobody /var/run
++runroot rpm -U /build/RPMS/noarch/pamupdate-1.0-2.noarch.rpm
++],
++[1],
++[],
++[ignore])
++
++RPMTEST_CHECK([
++# --nomtime shouldn't be needed but fixing that's another story
++runroot rpm -V --nomtime pamupdate
++],
++[0],
++[],
++[])
++RPMTEST_CLEANUP
+-- 
+2.47.1
+

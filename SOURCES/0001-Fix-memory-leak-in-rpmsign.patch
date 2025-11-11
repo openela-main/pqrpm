@@ -1,0 +1,27 @@
+From 65fa582b5cb267bb73c3e2b4c502f456d50c41f0 Mon Sep 17 00:00:00 2001
+From: Michal Domonkos <mdomonko@redhat.com>
+Date: Mon, 12 Aug 2024 17:15:48 +0200
+Subject: [PATCH] Fix memory leak in rpmsign
+
+Found by Coverity.
+
+Fixes: RHEL-37564
+---
+ tools/rpmsign.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/tools/rpmsign.c b/tools/rpmsign.c
+index a47b2c109..c5e3e11b4 100644
+--- a/tools/rpmsign.c
++++ b/tools/rpmsign.c
+@@ -152,6 +152,7 @@ static int doSign(poptContext optCon, struct rpmSignArgs *sargs)
+ 	char *key = rpmExpand("%{?_file_signing_key}", NULL);
+ 	if (rstreq(key, "")) {
+ 	    fprintf(stderr, _("You must set \"%%_file_signing_key\" in your macro file or on the command line with --fskpath\n"));
++	    free(key);
+ 	    goto exit;
+ 	}
+ 
+-- 
+2.46.0
+

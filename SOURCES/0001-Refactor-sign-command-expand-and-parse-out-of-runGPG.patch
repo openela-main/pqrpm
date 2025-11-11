@@ -1,0 +1,143 @@
+From 3b0a150af79668052bf5842b68341adbde016005 Mon Sep 17 00:00:00 2001
+Message-ID: <3b0a150af79668052bf5842b68341adbde016005.1728896192.git.pmatilai@redhat.com>
+From: Panu Matilainen <pmatilai@redhat.com>
+Date: Thu, 5 Sep 2024 09:07:26 +0300
+Subject: [PATCH 1/3] Refactor sign command expand and parse out of runGPG()
+
+We'll need the wider visibility of the executing command for the next
+steps. While at it, ensure the parsed signing command is minimally
+sufficient for what the code expects, ie has at least two items in
+the array.
+
+We now need two exit points, one for the case where we forked and one
+where we didn't. Also the case where waitpid() failed entirely must
+not return directly to avoid leaking, so merge it with the rest of
+the error handling if instead.
+
+(cherry picked from commit 2c9ad2bbc1d00010880076cd5c73e97ffcb946ed)
+---
+ sign/rpmgensig.c   | 51 ++++++++++++++++++++++++++++++----------------
+ tests/rpmsigdig.at |  8 ++++++++
+ 2 files changed, 42 insertions(+), 17 deletions(-)
+
+diff --git a/sign/rpmgensig.c b/sign/rpmgensig.c
+index a9c3c3e06..7bbd63216 100644
+--- a/sign/rpmgensig.c
++++ b/sign/rpmgensig.c
+@@ -188,6 +188,29 @@ exit:
+     return sigtd;
+ }
+ 
++char ** signCmd(const char *sigfile)
++{
++    int argc = 0;
++    char **argv = NULL;
++
++    rpmPushMacro(NULL, "__plaintext_filename", NULL, "-", -1);
++    rpmPushMacro(NULL, "__signature_filename", NULL, sigfile, -1);
++
++    char *cmd = rpmExpand("%{?__gpg_sign_cmd}", NULL);
++
++    rpmPopMacro(NULL, "__plaintext_filename");
++    rpmPopMacro(NULL, "__signature_filename");
++
++    if (poptParseArgvString(cmd, &argc, (const char ***)&argv) < 0 || argc < 2) {
++	rpmlog(RPMLOG_ERR, _("Invalid sign command: %s\n"), cmd);
++	argv = _free(argv);
++    }
++
++    free(cmd);
++
++    return argv;
++}
++
+ static int runGPG(sigTarget sigt, const char *sigfile)
+ {
+     int pid = 0, status;
+@@ -198,18 +221,17 @@ static int runGPG(sigTarget sigt, const char *sigfile)
+     ssize_t wantCount;
+     rpm_loff_t size;
+     int rc = 1; /* assume failure */
++    char **argv = NULL;
++
++    if ((argv = signCmd(sigfile)) == NULL)
++	goto exit_nowait;
+ 
+     if (pipe(pipefd) < 0) {
+         rpmlog(RPMLOG_ERR, _("Could not create pipe for signing: %m\n"));
+-        goto exit;
++        goto exit_nowait;
+     }
+ 
+-    rpmPushMacro(NULL, "__plaintext_filename", NULL, "-", -1);
+-    rpmPushMacro(NULL, "__signature_filename", NULL, sigfile, -1);
+-
+     if (!(pid = fork())) {
+-	char *const *av;
+-	char *cmd = NULL;
+ 	const char *tty = ttyname(STDIN_FILENO);
+ 	const char *gpg_path = NULL;
+ 
+@@ -223,19 +245,13 @@ static int runGPG(sigTarget sigt, const char *sigfile)
+ 	dup2(pipefd[0], STDIN_FILENO);
+ 	close(pipefd[1]);
+ 
+-	cmd = rpmExpand("%{?__gpg_sign_cmd}", NULL);
+-	rc = poptParseArgvString(cmd, NULL, (const char ***)&av);
+-	if (!rc)
+-	    rc = execve(av[0], av+1, environ);
++	rc = execve(argv[0], argv+1, environ);
+ 
+ 	rpmlog(RPMLOG_ERR, _("Could not exec %s: %s\n"), "gpg",
+ 			strerror(errno));
+ 	_exit(EXIT_FAILURE);
+     }
+ 
+-    rpmPopMacro(NULL, "__plaintext_filename");
+-    rpmPopMacro(NULL, "__signature_filename");
+-
+     close(pipefd[0]);
+     fpipe = fdopen(pipefd[1], "w");
+     if (!fpipe) {
+@@ -280,14 +296,15 @@ exit:
+ 
+     if (reaped == -1) {
+ 	rpmlog(RPMLOG_ERR, _("gpg waitpid failed (%s)\n"), strerror(errno));
+-	return rc;
+-    }
+-
+-    if (!WIFEXITED(status) || WEXITSTATUS(status)) {
++    } else if (!WIFEXITED(status) || WEXITSTATUS(status)) {
+ 	rpmlog(RPMLOG_ERR, _("gpg exec failed (%d)\n"), WEXITSTATUS(status));
+     } else {
+ 	rc = 0;
+     }
++
++exit_nowait:
++    free(argv);
++
+     return rc;
+ }
+ 
+diff --git a/tests/rpmsigdig.at b/tests/rpmsigdig.at
+index b726e79ef..14dffc27a 100644
+--- a/tests/rpmsigdig.at
++++ b/tests/rpmsigdig.at
+@@ -1028,6 +1028,14 @@ cmp -s ${ORIG} ${NEW}; echo $?
+ ],
+ [])
+ 
++RPMTEST_CHECK([
++run rpmsign --define "__gpg_sign_cmd mumble" --key-id 1964C5FC --addsign "${RPMTEST}"/tmp/hello-2.0-1.x86_64.rpm > /dev/null
++],
++[1],
++[],
++[error: Invalid sign command: mumble
++])
++
+ # rpmsign --addsign <signed>
+ RPMTEST_CHECK([
+ RPMDB_INIT
+-- 
+2.47.0
+

@@ -1,0 +1,115 @@
+From 9bb13c129ebd399645d173e51a5819bb9969e7c2 Mon Sep 17 00:00:00 2001
+From: Florian Festi <ffesti@redhat.com>
+Date: Wed, 12 Jun 2024 15:46:12 +0200
+Subject: [PATCH 4/5] Talk about rpmsign in the rpmsign man page
+
+In the past handling signatures was done by the rpm / rpmbuild binaries
+directly. When this functionality was split into rpmsign the man page
+was not adjusted accoringly. This is the long overdue update.
+
+(cherry picked from commit 8e1f55c7004e8c1a7d9140ab2dd9456a7ace3e77)
+
+Fixes: RHEL-73173
+---
+ docs/man/rpmsign.8.md | 14 +++++++-------
+ 1 file changed, 7 insertions(+), 7 deletions(-)
+
+diff --git a/docs/man/rpmsign.8.md b/docs/man/rpmsign.8.md
+index 04d6855e7..339e28451 100644
+--- a/docs/man/rpmsign.8.md
++++ b/docs/man/rpmsign.8.md
+@@ -15,12 +15,12 @@ SYNOPSIS
+ SIGNING PACKAGES:
+ -----------------
+ 
+-**rpm** **\--addsign\|\--resign** \[**rpmsign-options**\] *PACKAGE\_FILE
++**rpmsign** **\--addsign\|\--resign** \[**rpmsign-options**\] *PACKAGE\_FILE
+ \...*
+ 
+-**rpm** **\--delsign** *PACKAGE\_FILE \...*
++**rpmsign** **\--delsign** *PACKAGE\_FILE \...*
+ 
+-**rpm** **\--delfilesign** *PACKAGE\_FILE \...*
++**rpmsign** **\--delfilesign** *PACKAGE\_FILE \...*
+ 
+ rpmsign-options
+ ---------------
+@@ -35,14 +35,14 @@ new signatures for each package *PACKAGE\_FILE* given, replacing any
+ existing signatures. There are two options for historical reasons, there
+ is no difference in behavior currently.
+ 
+-To create a signature rpm needs to verify the package\'s checksum. As a
++To create a signature rpmsign needs to verify the package\'s checksum. As a
+ result packages with a MD5/SHA1 checksums cannot be signed in FIPS mode.
+ 
+-**rpm** **\--delsign** *PACKAGE\_FILE \...*
++**rpmsign** **\--delsign** *PACKAGE\_FILE \...*
+ 
+ Delete all signatures from each package *PACKAGE\_FILE* given.
+ 
+-**rpm** **\--delfilesign** *PACKAGE\_FILE \...*
++**rpmsign** **\--delfilesign** *PACKAGE\_FILE \...*
+ 
+ Delete all IMA and fsverity file signatures from each package
+ *PACKAGE\_FILE* given.
+@@ -54,7 +54,7 @@ SIGN OPTIONS
+ 
+ :   Force RPM V3 header+payload signature addition. These are expensive
+     and redundant baggage on packages where a separate payload digest
+-    exists (packages built with rpm \>= 4.14). Rpm will automatically
++    exists (packages built with rpm \>= 4.14). Rpmsign will automatically
+     detect the need for V3 signatures, but this option can be used to
+     force their creation if the packages must be fully signature
+     verifiable with rpm \< 4.14 or other interoperability reasons.
+-- 
+2.49.0
+
+diff -up rpm-4.19.1.1/docs/man/rpmsign.8.orig rpm-4.19.1.1/docs/man/rpmsign.8
+--- rpm-4.19.1.1/docs/man/rpmsign.8.orig	2025-04-24 12:35:05.722684233 +0200
++++ rpm-4.19.1.1/docs/man/rpmsign.8	2025-04-24 12:42:46.963922808 +0200
+@@ -22,12 +22,12 @@ rpmsign - RPM Package Signing
+ .SH SYNOPSIS
+ .SS SIGNING PACKAGES:
+ .PP
+-\f[B]rpm\f[R] \f[B]--addsign|--resign\f[R] [\f[B]rpmsign-options\f[R]]
+-\f[I]PACKAGE_FILE ...\f[R]
++\f[B]rpmsign\f[R] \f[B]--addsign|--resign\f[R]
++[\f[B]rpmsign-options\f[R]] \f[I]PACKAGE_FILE ...\f[R]
+ .PP
+-\f[B]rpm\f[R] \f[B]--delsign\f[R] \f[I]PACKAGE_FILE ...\f[R]
++\f[B]rpmsign\f[R] \f[B]--delsign\f[R] \f[I]PACKAGE_FILE ...\f[R]
+ .PP
+-\f[B]rpm\f[R] \f[B]--delfilesign\f[R] \f[I]PACKAGE_FILE ...\f[R]
++\f[B]rpmsign\f[R] \f[B]--delfilesign\f[R] \f[I]PACKAGE_FILE ...\f[R]
+ .SS rpmsign-options
+ .PP
+ [\f[B]--rpmv3\f[R]] [\f[B]--fskpath \f[R]\f[I]KEY\f[R]]
+@@ -40,15 +40,16 @@ replacing any existing signatures.
+ There are two options for historical reasons, there is no difference in
+ behavior currently.
+ .PP
+-To create a signature rpm needs to verify the package\[aq]s checksum.
++To create a signature rpmsign needs to verify the package\[aq]s
++checksum.
+ As a result packages with a MD5/SHA1 checksums cannot be signed in FIPS
+ mode.
+ .PP
+-\f[B]rpm\f[R] \f[B]--delsign\f[R] \f[I]PACKAGE_FILE ...\f[R]
++\f[B]rpmsign\f[R] \f[B]--delsign\f[R] \f[I]PACKAGE_FILE ...\f[R]
+ .PP
+ Delete all signatures from each package \f[I]PACKAGE_FILE\f[R] given.
+ .PP
+-\f[B]rpm\f[R] \f[B]--delfilesign\f[R] \f[I]PACKAGE_FILE ...\f[R]
++\f[B]rpmsign\f[R] \f[B]--delfilesign\f[R] \f[I]PACKAGE_FILE ...\f[R]
+ .PP
+ Delete all IMA and fsverity file signatures from each package
+ \f[I]PACKAGE_FILE\f[R] given.
+@@ -58,7 +59,7 @@ Delete all IMA and fsverity file signatu
+ Force RPM V3 header+payload signature addition.
+ These are expensive and redundant baggage on packages where a separate
+ payload digest exists (packages built with rpm >= 4.14).
+-Rpm will automatically detect the need for V3 signatures, but this
++Rpmsign will automatically detect the need for V3 signatures, but this
+ option can be used to force their creation if the packages must be fully
+ signature verifiable with rpm < 4.14 or other interoperability reasons.
+ .TP

@@ -1,0 +1,163 @@
+From 75122bd6421526f41ad784036f63a022e9aca4b5 Mon Sep 17 00:00:00 2001
+From: Panu Matilainen <pmatilai@redhat.com>
+Date: Thu, 15 Feb 2024 09:26:38 +0200
+Subject: [PATCH 2/2] Add support for spec local file attributes and generators
+
+Allow declaring file attributes from the spec via %_local_file_attrs
+macro. This allows enabling file attributes and their dependency
+generators even if they are only shipped in the package itself and are
+not yet installed.
+
+The names need to be separated by colons (:).
+
+Co-authored-by: Florian Festi <ffesti@redhat.com>
+
+Backported from commits:
+d3b7b0e3280dbc66bd39cd851af32f16fd863f1b
+c167ef8bdaecdd2e306ec896c919607ba9cceb6f
+
+Fixes: RHEL-84057
+---
+ build/rpmfc.c                        | 32 +++++++++++++----
+ docs/manual/dependency_generators.md | 10 ++++++
+ tests/rpmbuild.at                    | 52 ++++++++++++++++++++++++++++
+ 3 files changed, 88 insertions(+), 6 deletions(-)
+
+diff --git a/build/rpmfc.c b/build/rpmfc.c
+index 4b67a9bae..fb07f6626 100644
+--- a/build/rpmfc.c
++++ b/build/rpmfc.c
+@@ -1124,20 +1124,40 @@ static int initAttrs(rpmfc fc)
+     ARGV_t files = NULL;
+     char * attrPath = rpmExpand("%{_fileattrsdir}/*.attr", NULL);
+     int nattrs = 0;
++    ARGV_t all_attrs = NULL;
+ 
+-    /* Discover known attributes from pathnames + initialize them */
++    /* Discover known attributes from pathnames */
+     if (rpmGlob(attrPath, NULL, &files) == 0) {
+-	nattrs = argvCount(files);
+-	fc->atypes = xcalloc(nattrs + 1, sizeof(*fc->atypes));
+-	for (int i = 0; i < nattrs; i++) {
++	int nfiles = argvCount(files);
++	for (int i = 0; i < nfiles; i++) {
+ 	    char *bn = basename(files[i]);
+ 	    bn[strlen(bn)-strlen(".attr")] = '\0';
+-	    fc->atypes[i] = rpmfcAttrNew(bn);
++	    argvAdd(&all_attrs, bn);
+ 	}
+-	fc->atypes[nattrs] = NULL;
+ 	argvFree(files);
+     }
++
++    /* Get file attributes from _local_file_attrs macro */
++    char * local_attr_names = rpmExpand("%{?_local_file_attrs}", NULL);
++    ARGV_t local_attrs = argvSplitString(local_attr_names, ":", ARGV_SKIPEMPTY);
++    int nlocals = argvCount(local_attrs);
++    for (int i = 0; i < nlocals; i++) {
++	argvAddUniq(&all_attrs, local_attrs[i]);
++    }
++
++    /* Initialize attr objects */
++    nattrs = argvCount(all_attrs);
++    fc->atypes = xcalloc(nattrs + 1, sizeof(*fc->atypes));
++
++    for (int i = 0; i < nattrs; i++) {
++	fc->atypes[i] = rpmfcAttrNew(all_attrs[i]);
++    }
++    fc->atypes[nattrs] = NULL;
++
+     free(attrPath);
++    free(local_attr_names);
++    argvFree(local_attrs);
++    argvFree(all_attrs);
+     return nattrs;
+ }
+ 
+diff --git a/docs/manual/dependency_generators.md b/docs/manual/dependency_generators.md
+index 5538bb4c7..0f851fc50 100644
+--- a/docs/manual/dependency_generators.md
++++ b/docs/manual/dependency_generators.md
+@@ -116,6 +116,16 @@ shelling out to execute a script that calls `basename`:
+ %__foo_provides()	%{basename:%{1}}
+ ```
+ 
++## Using File Attributes in their own Package
++
++Normally file attributes and their dependency generators are shipped in separate packages that need to be installed before the package making use of them can be build.
++
++Since rpm 4.20 the names of file attributes from the package itself can be put into the *_local_file_attrs* macro separated by colons (:). The macros that normally go into the *\*.attr* files still need to be defined (the dependency generators typically pointing to some Source files or some files in the install root).
++
++This mechanism can be used for both file attributes the package ships to be installed but also for file attributes that are used during the own building process only.
++
++For the former packagers need to be aware that a previus version of the package might be installed on the system the package is build on. Thus the Spec file must set all macros used in the past and undefine the ones not longer being used.
++
+ ## Tweaking Dependency Generators
+ Technically, all aspects of file attributes and the generator helpers they use can be overridden from spec by (re)defining the related macros, but packagers should generally avoid this, as the attributes and their names are subject to change, depending on rpm version and which packages are present during build. Unwanted dependencies can be filtered with a separate set of macros which are intended primarily for use in spec files:
+ 
+diff --git a/tests/rpmbuild.at b/tests/rpmbuild.at
+index ad7c40600..5bd8ee402 100644
+--- a/tests/rpmbuild.at
++++ b/tests/rpmbuild.at
+@@ -913,6 +913,58 @@ runroot rpm -qp --requires /build/RPMS/noarch/shebang-0.1-1.noarch.rpm|grep -v ^
+ [])
+ RPMTEST_CLEANUP
+ 
++AT_SETUP([Local dependency generator])
++AT_KEYWORDS([build])
++RPMTEST_CHECK([
++RPMDB_INIT
++
++runroot rpmbuild -bb --quiet \
++		--define '_local_file_attrs my_test_attr' \
++		--define '__my_test_attr_provides() foo(%{basename:%{1}})' \
++		--define '__my_test_attr_path .*' \
++		/data/SPECS/shebang.spec
++runroot rpm -qp --provides /build/RPMS/noarch/shebang-0.1-1.noarch.rpm|grep -v ^rpmlib
++],
++[0],
++[foo(shebang)
++shebang = 0.1-1
++],
++[])
++
++RPMTEST_CHECK([
++RPMDB_INIT
++
++runroot rpmbuild -bb --quiet \
++		--define '_local_file_attrs script' \
++		--define '__script_provides() foobar(%{basename:%{1}})' \
++		/data/SPECS/shebang.spec
++runroot rpm -qp --provides /build/RPMS/noarch/shebang-0.1-1.noarch.rpm|grep -v ^rpmlib
++],
++[0],
++[foobar(shebang)
++shebang = 0.1-1
++],
++[])
++
++RPMTEST_CHECK([
++RPMDB_INIT
++
++runroot rpmbuild -bb --quiet \
++		--define '_local_file_attrs my_test_attr:script' \
++		--define '__my_test_attr_provides() foo(%{basename:%{1}})' \
++		--define '__my_test_attr_path .*' \
++		--define '__script_provides() foobar(%{basename:%{1}})' \
++		/data/SPECS/shebang.spec
++runroot rpm -qp --provides /build/RPMS/noarch/shebang-0.1-1.noarch.rpm|grep -v ^rpmlib
++],
++[0],
++[foo(shebang)
++foobar(shebang)
++shebang = 0.1-1
++],
++[])
++RPMTEST_CLEANUP
++
+ AT_SETUP([elf dependencies])
+ AT_KEYWORDS([build])
+ RPMDB_INIT
+-- 
+2.49.0
+

@@ -1,0 +1,91 @@
+From 3c08dc15ba46495eea776ab9d16d4bdc9ce0b983 Mon Sep 17 00:00:00 2001
+From: Michal Domonkos <mdomonko@redhat.com>
+Date: Fri, 26 Jul 2024 10:44:04 +0200
+Subject: [PATCH 3/3] Fix root relocation regression
+
+When relocating the root directory, make sure we insert the new path's
+dirname to dirNames[] even if the root itself is owned by the package.
+
+This appears to have been the intention from the first version (largely
+untouched since) of this code as we allow the root to pass through the
+first checks (by setting len to 0 in that case) as well as the second
+for loop where we do the relocations.
+
+This allows fsm to properly create and remove the relocated directory
+since we're now using fd-based calls (#1919) and the parent directory
+needs to be opened first.
+
+No need to do string comparison here, the empty basename signals that
+we're processing the root directory, so just use that.
+
+Building a relocatable package that owns the root directory seems to be
+a handy way to create user-installable packages (see RHEL-28967) and it
+happened to work before with the path-based calls so this technically
+was a regression.  Add a test that emulates this use case.
+
+Backported from commits:
+31c14ba6610568c2d634647fed1fb57221178da9
+308ac60677732e9979b9ce11e5a3085906da1901
+
+Fixes: RHEL-56613
+---
+ lib/relocation.c | 14 ++++++++------
+ 1 file changed, 8 insertions(+), 6 deletions(-)
+
+diff --git a/lib/relocation.c b/lib/relocation.c
+index 2919b4873..a7110d426 100644
+--- a/lib/relocation.c
++++ b/lib/relocation.c
+@@ -124,7 +124,7 @@ void rpmRelocateFileList(rpmRelocation *relocations, int numRelocations,
+     char ** baseNames;
+     char ** dirNames;
+     uint32_t * dirIndexes;
+-    rpm_count_t fileCount, dirCount;
++    rpm_count_t fileCount, dirCount, dirCountOrig;
+     int nrelocated = 0;
+     int fileAlloced = 0;
+     char * fn = NULL;
+@@ -163,7 +163,7 @@ void rpmRelocateFileList(rpmRelocation *relocations, int numRelocations,
+     baseNames = bnames.data;
+     dirIndexes = dindexes.data;
+     fileCount = rpmtdCount(&bnames);
+-    dirCount = rpmtdCount(&dnames);
++    dirCount = dirCountOrig = rpmtdCount(&dnames);
+     /* XXX TODO: use rpmtdDup() instead */
+     dirNames = dnames.data = duparray(dnames.data, dirCount);
+     dnames.flags |= RPMTD_PTR_ALLOCED;
+@@ -180,8 +180,9 @@ void rpmRelocateFileList(rpmRelocation *relocations, int numRelocations,
+ 	rpmFileTypes ft;
+ 	int fnlen;
+ 
++	size_t baselen = strlen(baseNames[i]);
+ 	size_t len = maxlen +
+-		strlen(dirNames[dirIndexes[i]]) + strlen(baseNames[i]) + 1;
++		strlen(dirNames[dirIndexes[i]]) + baselen + 1;
+ 	if (len >= fileAlloced) {
+ 	    fileAlloced = len * 2;
+ 	    fn = xrealloc(fn, fileAlloced);
+@@ -243,8 +244,9 @@ assert(fn != NULL);		/* XXX can't happen */
+ 	    continue;
+ 	}
+ 
+-	/* Relocation on full paths only, please. */
+-	if (fnlen != len) continue;
++	/* Relocation on '/' and full paths only, please. */
++	if (baselen && fnlen != len)
++	    continue;
+ 
+ 	rpmlog(RPMLOG_DEBUG, "relocating %s to %s\n",
+ 	       fn, relocations[j].newPath);
+@@ -295,7 +297,7 @@ assert(fn != NULL);		/* XXX can't happen */
+     }
+ 
+     /* Finish off by relocating directories. */
+-    for (i = dirCount - 1; i >= 0; i--) {
++    for (i = dirCountOrig - 1; i >= 0; i--) {
+ 	for (j = numRelocations - 1; j >= 0; j--) {
+ 
+ 	    if (relocations[j].oldPath == NULL) /* XXX can't happen */
+-- 
+2.48.1
+

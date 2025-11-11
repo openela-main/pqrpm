@@ -1,0 +1,129 @@
+From 3c1055628380d66934578060a4a6c678f1261456 Mon Sep 17 00:00:00 2001
+Message-ID: <3c1055628380d66934578060a4a6c678f1261456.1728896192.git.pmatilai@redhat.com>
+In-Reply-To: <3b0a150af79668052bf5842b68341adbde016005.1728896192.git.pmatilai@redhat.com>
+References: <3b0a150af79668052bf5842b68341adbde016005.1728896192.git.pmatilai@redhat.com>
+From: Panu Matilainen <pmatilai@redhat.com>
+Date: Thu, 5 Sep 2024 09:44:40 +0300
+Subject: [PATCH 2/3] Eliminate hardcoded GPG references from user visible
+ messages
+
+Use the OpenPGP standard name or the configured+parsed signing command
+in messages as appropriate. Also detect if we're specifically using
+gpg and only set up its environment in that case to avoid bleeding
+those messages to innocent bypassers.
+
+Fixes: #3274
+(backported from commit a3cf4f674dd59c1c80f97780643c184e705518ce)
+---
+ sign/rpmgensig.c   | 42 +++++++++++++++++++++++++-----------------
+ tests/rpmsigdig.at |  9 +++++++++
+ 2 files changed, 34 insertions(+), 17 deletions(-)
+
+diff --git a/sign/rpmgensig.c b/sign/rpmgensig.c
+index 7bbd63216..fb7368e14 100644
+--- a/sign/rpmgensig.c
++++ b/sign/rpmgensig.c
+@@ -232,23 +232,29 @@ static int runGPG(sigTarget sigt, const char *sigfile)
+     }
+ 
+     if (!(pid = fork())) {
+-	const char *tty = ttyname(STDIN_FILENO);
+-	const char *gpg_path = NULL;
+-
+-	if (!getenv("GPG_TTY") && (!tty || setenv("GPG_TTY", tty, 0)))
+-	    rpmlog(RPMLOG_WARNING, _("Could not set GPG_TTY to stdin: %m\n"));
+-
+-	gpg_path = rpmExpand("%{?_gpg_path}", NULL);
+-	if (gpg_path && *gpg_path != '\0')
+-	    (void) setenv("GNUPGHOME", gpg_path, 1);
++	/* GnuPG needs extra setup, try to see if that's what we're running */
++	char *out = rpmExpand("%(", argv[0], " --version 2> /dev/null)", NULL);
++	int using_gpg = (strstr(out, "GnuPG") != NULL);
++	if (using_gpg) {
++	    const char *tty = ttyname(STDIN_FILENO);
++	    const char *gpg_path = NULL;
++
++	    if (!getenv("GPG_TTY") && (!tty || setenv("GPG_TTY", tty, 0)))
++		rpmlog(RPMLOG_WARNING, _("Could not set GPG_TTY to stdin: %m\n"));
++
++	    gpg_path = rpmExpand("%{?_gpg_path}", NULL);
++	    if (gpg_path && *gpg_path != '\0')
++		(void) setenv("GNUPGHOME", gpg_path, 1);
++	}
++	free(out);
+ 
+ 	dup2(pipefd[0], STDIN_FILENO);
+ 	close(pipefd[1]);
+ 
+ 	rc = execve(argv[0], argv+1, environ);
+ 
+-	rpmlog(RPMLOG_ERR, _("Could not exec %s: %s\n"), "gpg",
+-			strerror(errno));
++	rpmlog(RPMLOG_ERR, _("Could not exec %s: %s\n"), argv[0],
++		strerror(errno));
+ 	_exit(EXIT_FAILURE);
+     }
+ 
+@@ -295,9 +301,11 @@ exit:
+     } while (reaped == -1 && errno == EINTR);
+ 
+     if (reaped == -1) {
+-	rpmlog(RPMLOG_ERR, _("gpg waitpid failed (%s)\n"), strerror(errno));
++	rpmlog(RPMLOG_ERR, _("%s waitpid failed (%s)\n"), argv[0],
++		strerror(errno));
+     } else if (!WIFEXITED(status) || WEXITSTATUS(status)) {
+-	rpmlog(RPMLOG_ERR, _("gpg exec failed (%d)\n"), WEXITSTATUS(status));
++	rpmlog(RPMLOG_ERR, _("%s exec failed (%d)\n"), argv[0],
++		WEXITSTATUS(status));
+     } else {
+ 	rc = 0;
+     }
+@@ -328,13 +336,13 @@ static rpmtd makeGPGSignature(Header sigh, int ishdr, sigTarget sigt)
+ 	goto exit;
+ 
+     if (stat(sigfile, &st)) {
+-	/* GPG failed to write signature */
+-	rpmlog(RPMLOG_ERR, _("gpg failed to write signature\n"));
++	/* External command failed to write signature */
++	rpmlog(RPMLOG_ERR, _("failed to write signature\n"));
+ 	goto exit;
+     }
+ 
+     pktlen = st.st_size;
+-    rpmlog(RPMLOG_DEBUG, "GPG sig size: %zd\n", pktlen);
++    rpmlog(RPMLOG_DEBUG, "OpenPGP sig size: %zd\n", pktlen);
+     pkt = xmalloc(pktlen);
+ 
+     {	FD_t fd;
+@@ -351,7 +359,7 @@ static rpmtd makeGPGSignature(Header sigh, int ishdr, sigTarget sigt)
+ 	}
+     }
+ 
+-    rpmlog(RPMLOG_DEBUG, "Got %zd bytes of GPG sig\n", pktlen);
++    rpmlog(RPMLOG_DEBUG, "Got %zd bytes of OpenPGP sig\n", pktlen);
+ 
+     /* Parse the signature, change signature tag as appropriate. */
+     sigtd = makeSigTag(sigh, ishdr, pkt, pktlen);
+diff --git a/tests/rpmsigdig.at b/tests/rpmsigdig.at
+index 14dffc27a..d19f85d04 100644
+--- a/tests/rpmsigdig.at
++++ b/tests/rpmsigdig.at
+@@ -1036,6 +1036,15 @@ run rpmsign --define "__gpg_sign_cmd mumble" --key-id 1964C5FC --addsign "${RPMT
+ [error: Invalid sign command: mumble
+ ])
+ 
++RPMTEST_CHECK([
++run rpmsign --define "__gpg /gnus/not/here" --key-id 1964C5FC --addsign "${RPMTEST}"/tmp/hello-2.0-1.x86_64.rpm > /dev/null
++],
++[1],
++[],
++[error: Could not exec /gnus/not/here: No such file or directory
++error: /gnus/not/here exec failed (1)
++])
++
+ # rpmsign --addsign <signed>
+ RPMTEST_CHECK([
+ RPMDB_INIT
+-- 
+2.47.0
+

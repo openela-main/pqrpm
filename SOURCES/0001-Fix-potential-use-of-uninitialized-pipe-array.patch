@@ -1,0 +1,32 @@
+From bff65aad8af719542c7b0c6429e09223c014a909 Mon Sep 17 00:00:00 2001
+From: Michal Domonkos <mdomonko@redhat.com>
+Date: Thu, 6 Jun 2024 09:15:02 +0200
+Subject: [PATCH] Fix potential use of uninitialized pipe array
+
+We only call pipe(2) after the script is written to disk so if the
+latter fails, the array will be left uninitialized and subsequently read
+after skipping to the exit label.  Fix by initializing it.
+
+Found by Coverity.
+
+Fixes: RHEL-22604
+---
+ lib/rpmscript.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/lib/rpmscript.c b/lib/rpmscript.c
+index 281c55c53..1de4acf8e 100644
+--- a/lib/rpmscript.c
++++ b/lib/rpmscript.c
+@@ -316,7 +316,7 @@ static rpmRC runExtScript(rpmPlugins plugins, ARGV_const_t prefixes,
+     char * fn = NULL;
+     pid_t pid, reaped;
+     int status;
+-    int inpipe[2];
++    int inpipe[2] = { -1, -1 };
+     FILE *in = NULL;
+     const char *line;
+     char *mline = NULL;
+-- 
+2.46.0
+

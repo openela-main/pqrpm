@@ -1,0 +1,252 @@
+From 91b0ba7f6b1ec65aa2e5c1c6752e3106892b4adf Mon Sep 17 00:00:00 2001
+From: Panu Matilainen <pmatilai@redhat.com>
+Date: Tue, 2 Apr 2024 13:21:00 +0300
+Subject: [PATCH] Ensure binary and source headers are identified as such after
+ parse
+
+The two commits improve source and binary package header detection right
+after spec parse, fixing #2819 in the process. Details in commits.
+
+Backported from commits:
+8703ce740f24d7b7c443cce74fccf08df00e89c2
+dc47a50c6345a25b861305d8aa8ae464098834ff
+e0e43e93777701f5f2e6f7505b8e9b9e9681aee1
+0320d61198537079c80087a2b174963d25893b79
+
+Fixes: RHEL-87383
+---
+ build/build.c     |  1 +
+ build/files.c     | 15 +--------------
+ build/pack.c      |  2 --
+ build/parseSpec.c | 10 ++++++++++
+ lib/headerutil.c  |  9 ++++++++-
+ tests/rpmbuild.at | 16 ++++++++++++++++
+ tests/rpmquery.at |  2 ++
+ tests/rpmspec.at  | 21 +++++++++++++++++++++
+ 8 files changed, 59 insertions(+), 17 deletions(-)
+
+diff --git a/build/build.c b/build/build.c
+index f2cf98c8b..c35fd137a 100644
+--- a/build/build.c
++++ b/build/build.c
+@@ -393,6 +393,7 @@ static rpmRC buildSpec(rpmts ts, BTA_t buildArgs, rpmSpec spec, int what)
+ 		!(spec->flags & RPMSPEC_FORCE)) {
+ 		/* Create buildreqs package */
+ 		char *nvr = headerGetAsString(spec->packages->header, RPMTAG_NVR);
++		free(spec->sourceRpmName);
+ 		rasprintf(&spec->sourceRpmName, "%s.buildreqs.nosrc.rpm", nvr);
+ 		free(nvr);
+ 		/* free sources to not include them in the buildreqs package */
+diff --git a/build/files.c b/build/files.c
+index c403c806e..61f7ff10f 100644
+--- a/build/files.c
++++ b/build/files.c
+@@ -2661,16 +2661,6 @@ exit:
+     return fl.processingFailed ? RPMRC_FAIL : RPMRC_OK;
+ }
+ 
+-static void genSourceRpmName(rpmSpec spec)
+-{
+-    if (spec->sourceRpmName == NULL) {
+-	char *nvr = headerGetAsString(spec->packages->header, RPMTAG_NVR);
+-	rasprintf(&spec->sourceRpmName, "%s.%ssrc.rpm", nvr,
+-	    	  spec->noSource ? "no" : "");
+-	free(nvr);
+-    }
+-}
+-
+ rpmRC processSourceFiles(rpmSpec spec, rpmBuildPkgFlags pkgFlags)
+ {
+     struct Source *srcPtr;
+@@ -2688,7 +2678,6 @@ rpmRC processSourceFiles(rpmSpec spec, rpmBuildPkgFlags pkgFlags)
+ 	oneshot = 1;
+     }
+ 
+-    genSourceRpmName(spec);
+     /* Construct the file list and source entries */
+     argvAdd(&files, spec->specFile);
+     for (srcPtr = spec->sources; srcPtr != NULL; srcPtr = srcPtr->next) {
+@@ -2838,6 +2827,7 @@ static rpmTagVal copyTagsFromMainDebug[] = {
+     RPMTAG_OS,
+     RPMTAG_PLATFORM,
+     RPMTAG_OPTFLAGS,
++    RPMTAG_SOURCERPM,
+     0
+ };
+ 
+@@ -3130,7 +3120,6 @@ rpmRC processBinaryFiles(rpmSpec spec, rpmBuildPkgFlags pkgFlags,
+     elf_version (EV_CURRENT);
+ #endif
+     check_fileList = newStringBuf();
+-    genSourceRpmName(spec);
+     buildroot = rpmGenPath(spec->rootDir, spec->buildRoot, NULL);
+     
+     if (rpmExpandNumeric("%{?_debuginfo_subpackages}")) {
+@@ -3186,8 +3175,6 @@ rpmRC processBinaryFiles(rpmSpec spec, rpmBuildPkgFlags pkgFlags,
+ 	if (pkg->fileList == NULL)
+ 	    continue;
+ 
+-	headerPutString(pkg->header, RPMTAG_SOURCERPM, spec->sourceRpmName);
+-
+ 	nvr = headerGetAsString(pkg->header, RPMTAG_NVRA);
+ 	rpmlog(RPMLOG_NOTICE, _("Processing files: %s\n"), nvr);
+ 	free(nvr);
+diff --git a/build/pack.c b/build/pack.c
+index f7dac6d9a..9eb304642 100644
+--- a/build/pack.c
++++ b/build/pack.c
+@@ -796,13 +796,11 @@ rpmRC packageSources(rpmSpec spec, char **cookie)
+ {
+     Package sourcePkg = spec->sourcePackage;
+     rpmRC rc;
+-    uint32_t one = 1;
+ 
+     /* Add some cruft */
+     headerPutString(sourcePkg->header, RPMTAG_RPMVERSION, VERSION);
+     headerPutString(sourcePkg->header, RPMTAG_BUILDHOST, spec->buildHost);
+     headerPutUint32(sourcePkg->header, RPMTAG_BUILDTIME, &(spec->buildTime), 1);
+-    headerPutUint32(sourcePkg->header, RPMTAG_SOURCEPACKAGE, &one, 1);
+ 
+     /* Include spec in parsed and expanded form */
+     headerPutString(sourcePkg->header, RPMTAG_SPEC, getStringBuf(spec->parsed));
+diff --git a/build/parseSpec.c b/build/parseSpec.c
+index 3929c0a26..e64b23af2 100644
+--- a/build/parseSpec.c
++++ b/build/parseSpec.c
+@@ -648,11 +648,13 @@ static void initSourceHeader(rpmSpec spec)
+ {
+     Package sourcePkg = spec->sourcePackage;
+     struct Source *srcPtr;
++    uint32_t one = 1;
+ 
+     if (headerIsEntry(sourcePkg->header, RPMTAG_NAME))
+ 	return;
+ 
+     /* Only specific tags are added to the source package header */
++    headerPutUint32(sourcePkg->header, RPMTAG_SOURCEPACKAGE, &one, 1);
+     headerCopyTags(spec->packages->header, sourcePkg->header, sourceTags);
+ 
+     /* Add the build restrictions */
+@@ -694,8 +696,15 @@ static void initSourceHeader(rpmSpec spec)
+ 	    }
+ 	}
+     }
++    if (spec->sourceRpmName == NULL) {
++	char *nvr = headerGetAsString(spec->packages->header, RPMTAG_NVR);
++	rasprintf(&spec->sourceRpmName, "%s.%ssrc.rpm", nvr,
++		spec->noSource ? "no" : "");
++	free(nvr);
++    }
+ 
+     /* Provide all package NEVRs that would be built */
++    /* Insert RPMTAG_SOURCERPM to all packages as well */
+     for (Package p = spec->packages; p != NULL; p = p->next) {
+ 	if (p->fileList) {
+ 	    Header h = sourcePkg->header;
+@@ -704,6 +713,7 @@ static void initSourceHeader(rpmSpec spec)
+ 	    headerPutUint32(h, RPMTAG_PROVIDEFLAGS, &dsflags, 1);
+ 	    headerPutString(h, RPMTAG_PROVIDEVERSION, rpmdsEVR(p->ds));
+ 	}
++	headerPutString(p->header, RPMTAG_SOURCERPM, spec->sourceRpmName);
+     }
+ }
+ 
+diff --git a/lib/headerutil.c b/lib/headerutil.c
+index fab210ff2..15aa246ef 100644
+--- a/lib/headerutil.c
++++ b/lib/headerutil.c
+@@ -14,7 +14,14 @@
+ 
+ int headerIsSource(Header h)
+ {
+-    return (!headerIsEntry(h, RPMTAG_SOURCERPM));
++    /* Positive identification of a source package */
++    if (headerIsEntry(h, RPMTAG_SOURCEPACKAGE))
++	return 1;
++    /* Positive identification of a binary package */
++    if (headerIsEntry(h, RPMTAG_SOURCERPM))
++	return 0;
++    /* Dunno, guess so (as per traditional behavior) */
++    return 1;
+ }
+ 
+ Header headerCopy(Header h)
+diff --git a/tests/rpmbuild.at b/tests/rpmbuild.at
+index ad7c40600..0f25c3002 100644
+--- a/tests/rpmbuild.at
++++ b/tests/rpmbuild.at
+@@ -1955,6 +1955,22 @@ No hello.debug
+ [ignore])
+ RPMTEST_CLEANUP
+ 
++AT_SETUP([rpmbuild debuginfo subpackages sourcerpm])
++AT_KEYWORDS([build] [sourcerpm])
++AT_SKIP_IF([$DEBUGINFO_DISABLED])
++RPMTEST_SETUP
++RPMTEST_CHECK([[
++rundebug rpmbuild -bb --quiet \
++		--define "_debuginfo_subpackages 1" \
++		 /data/SPECS/test-subpackages.spec
++runroot rpm -q --qf "%{nevr} %{sourcerpm}\n" /build/RPMS/*/test-*-debuginfo-1.0-1.*.rpm
++]],
++[0],
++[test-test2-debuginfo-1.0-1 test-1.0-1.src.rpm
++test-test3-debuginfo-1.0-1 test-1.0-1.src.rpm
++],
++[ignore])
++RPMTEST_CLEANUP
+ 
+ 
+ # ------------------------------
+diff --git a/tests/rpmquery.at b/tests/rpmquery.at
+index 7d604ad6e..f8c7db56b 100644
+--- a/tests/rpmquery.at
++++ b/tests/rpmquery.at
+@@ -1069,6 +1069,7 @@ runroot rpmspec -q --qf "[[%{*:tagnum}\n]]" --srpm /data/SPECS/mini.spec
+ 1016
+ 1021
+ 1022
++1106
+ ],
+ [])
+ 
+@@ -1086,6 +1087,7 @@ License
+ Group
+ Os
+ Arch
++Sourcepackage
+ ],
+ [])
+ RPMTEST_CLEANUP
+diff --git a/tests/rpmspec.at b/tests/rpmspec.at
+index e8914589c..ffae01ef2 100644
+--- a/tests/rpmspec.at
++++ b/tests/rpmspec.at
+@@ -357,3 +357,24 @@ make DESTDIR=$RPM_BUILD_ROOT install
+ ]],
+ [])
+ RPMTEST_CLEANUP
++
++AT_SETUP([rpmspec -q --rpms and --srpm])
++AT_KEYWORDS([rpmspec query])
++RPMTEST_CHECK([
++runroot rpmspec -q --rpms --target s390x \
++	/data/SPECS/hello.spec
++],
++[0],
++[hello-1.0-1.s390x
++],
++[])
++
++RPMTEST_CHECK([
++runroot rpmspec -q --srpm \
++	/data/SPECS/hello.spec
++],
++[0],
++[hello-1.0-1.src
++],
++[])
++RPMTEST_CLEANUP
+-- 
+2.49.0
+

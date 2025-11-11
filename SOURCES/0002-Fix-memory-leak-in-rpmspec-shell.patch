@@ -1,0 +1,32 @@
+From 891a625246a19abd5aecfa534b630f2e7d15c8d5 Mon Sep 17 00:00:00 2001
+From: Michal Domonkos <mdomonko@redhat.com>
+Date: Thu, 17 Apr 2025 13:04:50 +0200
+Subject: [PATCH 2/5] Fix memory leak in rpmspec --shell
+
+The history(3) library allocates its own copy of the line string passed
+to add_history() so we need to free it ourselves.
+
+Found by Coverity.
+
+(cherry picked from commit 96fe0562712227c1764f2bae27f1b138dda7e032)
+
+Fixes: RHEL-55284
+---
+ tools/rpmspec.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/tools/rpmspec.c b/tools/rpmspec.c
+index cf58de80e..2bf95684e 100644
+--- a/tools/rpmspec.c
++++ b/tools/rpmspec.c
+@@ -74,6 +74,7 @@ static int doShell(rpmSpec spec)
+ 	free(exp);
+ 	if (*line)
+ 	    add_history(line);
++	free(line);
+     }
+     return 0;
+ }
+-- 
+2.49.0
+

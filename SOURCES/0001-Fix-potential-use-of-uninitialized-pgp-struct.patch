@@ -1,0 +1,32 @@
+From 1b90b8c7d176026b669ce28c6e185724a4b208b0 Mon Sep 17 00:00:00 2001
+From: Michal Domonkos <mdomonko@redhat.com>
+Date: Fri, 7 Jun 2024 10:14:25 +0200
+Subject: [PATCH] Fix potential use of uninitialized pgp struct
+
+We only call initPgpData() after base64 encoding the pubkey so if the
+latter fails, the kd struct will be left uninitialized and subsequently
+read from after skipping to the exit label.  Fix by initializing it.
+
+Found by Coverity.
+
+Fixes: RHEL-22605
+---
+ lib/rpmts.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/lib/rpmts.c b/lib/rpmts.c
+index 3070b97e6..76964c60a 100644
+--- a/lib/rpmts.c
++++ b/lib/rpmts.c
+@@ -508,6 +508,8 @@ static int makePubkeyHeader(rpmts ts, rpmPubkey key, rpmPubkey *subkeys,
+     int rc = -1;
+     int i;
+ 
++    memset(&kd, 0, sizeof(kd));
++
+     if ((enc = rpmPubkeyBase64(key)) == NULL)
+ 	goto exit;
+ 
+-- 
+2.46.0
+

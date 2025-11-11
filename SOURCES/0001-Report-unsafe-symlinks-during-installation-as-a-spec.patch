@@ -1,0 +1,229 @@
+From 6d8f3cbe56839c7417fe17714b92034eea044895 Mon Sep 17 00:00:00 2001
+From: Panu Matilainen <pmatilai@redhat.com>
+Date: Mon, 19 Aug 2024 11:03:10 +0300
+Subject: [PATCH 1/2] Report unsafe symlinks during installation as a specific
+ case
+
+RPM refuses to follow non root owned symlinks pointing to files owned by
+another user for security reasons. This case was lumped in with
+O_DIRECTORY behavior, leading to confusing error message as the symlink
+often indeed points at a directory. Emit a more meaningful error message
+when encountering unsafe symlinks.
+
+We already detect the error condition in the main if block here, might
+as well set the error code right there and then so we don't need to
+redetect later. We previously only tested for the unsafe link condition
+when our O_DIRECTORY equivalent was set, but that seems wrong. Probably
+doesn't matter with the existing callers, but we really must not
+follow those unsafe symlinks no matter what.
+
+Co-authored-by: Florian Festi <ffesti@redhat.com>
+
+Backported from commits:
+14516542c113560dc0070df2f9102568a7a71b58
+535eacc96ae6fe5289a2917bb0af43e491b0f4f4
+
+Fixes: RHEL-73186
+---
+ lib/fsm.c     | 70 ++++++++++++++++++++++++++-------------------------
+ lib/rpmfi.c   |  2 +-
+ tests/rpmi.at |  4 +--
+ 3 files changed, 39 insertions(+), 37 deletions(-)
+
+diff --git a/lib/fsm.c b/lib/fsm.c
+index 36708acc3..5e073ce22 100644
+--- a/lib/fsm.c
++++ b/lib/fsm.c
+@@ -65,7 +65,7 @@ struct filedata_s {
+  * things around needlessly 
+  */ 
+ static const char * fileActionString(rpmFileAction a);
+-static int fsmOpenat(int dirfd, const char *path, int flags, int dir);
++static int fsmOpenat(int *fdp, int dirfd, const char *path, int flags, int dir);
+ static int fsmClose(int *wfdp);
+ 
+ /** \ingroup payload
+@@ -98,9 +98,9 @@ static int fsmLink(int odirfd, const char *opath, int dirfd, const char *path)
+ #ifdef WITH_CAP
+ static int cap_set_fileat(int dirfd, const char *path, cap_t fcaps)
+ {
+-    int rc = -1;
+-    int fd = fsmOpenat(dirfd, path, O_RDONLY|O_NOFOLLOW, 0);
+-    if (fd >= 0) {
++    int fd = -1;
++    int rc = fsmOpenat(&fd, dirfd, path, O_RDONLY|O_NOFOLLOW, 0);
++    if (!rc) {
+ 	rc = cap_set_fd(fd, fcaps);
+ 	fsmClose(&fd);
+     }
+@@ -299,12 +299,12 @@ static int fsmMkdir(int dirfd, const char *path, mode_t mode)
+     return rc;
+ }
+ 
+-static int fsmOpenat(int dirfd, const char *path, int flags, int dir)
++static int fsmOpenat(int *wfdp, int dirfd, const char *path, int flags, int dir)
+ {
+     struct stat lsb, sb;
+     int sflags = flags | O_NOFOLLOW;
+     int fd = openat(dirfd, path, sflags);
+-    int ffd = fd;
++    int rc = 0;
+ 
+     /*
+      * Only ever follow symlinks by root or target owner. Since we can't
+@@ -313,7 +313,7 @@ static int fsmOpenat(int dirfd, const char *path, int flags, int dir)
+      * it could've only been the link owner or root.
+      */
+     if (fd < 0 && errno == ELOOP && flags != sflags) {
+-	ffd = openat(dirfd, path, flags);
++	int ffd = openat(dirfd, path, flags);
+ 	if (ffd >= 0) {
+ 	    if (fstatat(dirfd, path, &lsb, AT_SYMLINK_NOFOLLOW) == 0) {
+ 		if (fstat(ffd, &sb) == 0) {
+@@ -322,17 +322,26 @@ static int fsmOpenat(int dirfd, const char *path, int flags, int dir)
+ 		    }
+ 		}
+ 	    }
+-	    if (ffd != fd)
++	    /* Symlink with non-matching owners */
++	    if (ffd != fd) {
+ 		close(ffd);
++		rc = RPMERR_INVALID_SYMLINK;
++	    }
+ 	}
+     }
+ 
+     /* O_DIRECTORY equivalent */
+-    if (dir && ((fd != ffd) || (fd >= 0 && fstat(fd, &sb) == 0 && !S_ISDIR(sb.st_mode)))) {
+-	errno = ENOTDIR;
++    if (!rc && dir && fd >= 0 && fstat(fd, &sb) == 0 && !S_ISDIR(sb.st_mode))
++	rc = RPMERR_ENOTDIR;
++
++    if (!rc && fd < 0)
++	rc = RPMERR_OPEN_FAILED;
++
++    if (rc)
+ 	fsmClose(&fd);
+-    }
+-    return fd;
++
++    *wfdp = fd;
++    return rc;
+ }
+ 
+ static int fsmDoMkDir(rpmPlugins plugins, int dirfd, const char *dn,
+@@ -351,9 +360,7 @@ static int fsmDoMkDir(rpmPlugins plugins, int dirfd, const char *dn,
+ 	rc = fsmMkdir(dirfd, dn, mode);
+ 
+     if (!rc) {
+-	*fdp = fsmOpenat(dirfd, dn, O_RDONLY|O_NOFOLLOW, 1);
+-	if (*fdp == -1)
+-	    rc = RPMERR_ENOTDIR;
++	rc = fsmOpenat(fdp, dirfd, dn, O_RDONLY|O_NOFOLLOW, 1);
+     }
+ 
+     if (!rc) {
+@@ -378,47 +385,44 @@ static int ensureDir(rpmPlugins plugins, const char *p, int owned, int create,
+     char *sp = NULL, *bn;
+     char *apath = NULL;
+     int oflags = O_RDONLY;
+-    int rc = 0;
+ 
+     if (*dirfdp >= 0)
+-	return rc;
++	return 0;
+ 
+-    int dirfd = fsmOpenat(-1, "/", oflags, 1);
++    int dirfd = -1;
++    int rc = fsmOpenat(&dirfd, -1, "/", oflags, 1);
+     int fd = dirfd; /* special case of "/" */
+ 
+     char *path = xstrdup(p);
+     char *dp = path;
+ 
+     while ((bn = strtok_r(dp, "/", &sp)) != NULL) {
+-	fd = fsmOpenat(dirfd, bn, oflags, 1);
++	rc = fsmOpenat(&fd, dirfd, bn, oflags, 1);
+ 	/* assemble absolute path for plugins benefit, sigh */
+ 	apath = rstrscat(&apath, "/", bn, NULL);
+ 
+-	if (fd < 0 && errno == ENOENT && create) {
++	if (rc && errno == ENOENT && create) {
+ 	    mode_t mode = S_IFDIR | (_dirPerms & 07777);
+ 	    rc = fsmDoMkDir(plugins, dirfd, bn, apath, owned, mode, &fd);
+ 	}
+ 
+ 	fsmClose(&dirfd);
+-	if (fd >= 0) {
+-	    dirfd = fd;
+-	} else {
+-	    if (!quiet) {
+-		rpmlog(RPMLOG_ERR, _("failed to open dir %s of %s: %s\n"),
+-			bn, p, strerror(errno));
+-	    }
+-	    rc = RPMERR_OPEN_FAILED;
++	if (rc)
+ 	    break;
+-	}
+ 
++	dirfd = fd;
+ 	dp = NULL;
+     }
+ 
+     if (rc) {
++	if (!quiet) {
++	    char *msg = rpmfileStrerror(rc);
++	    rpmlog(RPMLOG_ERR, _("failed to open dir %s of %s: %s\n"),
++		    bn, p, msg);
++	    free(msg);
++	}
+ 	fsmClose(&fd);
+ 	fsmClose(&dirfd);
+-    } else {
+-	rc = 0;
+     }
+     *dirfdp = dirfd;
+ 
+@@ -1026,10 +1030,8 @@ setmeta:
+ 		/* Only follow safe symlinks, and never on temporary files */
+ 		if (fp->suffix)
+ 		    flags |= AT_SYMLINK_NOFOLLOW;
+-		fd = fsmOpenat(di.dirfd, fp->fpath, flags,
++		rc = fsmOpenat(&fd, di.dirfd, fp->fpath, flags,
+ 				S_ISDIR(fp->sb.st_mode));
+-		if (fd < 0)
+-		    rc = RPMERR_OPEN_FAILED;
+ 	    }
+ 
+ 	    if (!rc && fp->setmeta) {
+diff --git a/lib/rpmfi.c b/lib/rpmfi.c
+index 011d6787e..b35195e76 100644
+--- a/lib/rpmfi.c
++++ b/lib/rpmfi.c
+@@ -2487,7 +2487,7 @@ char * rpmfileStrerror(int rc)
+     case RPMERR_DIGEST_MISMATCH: s = _("Digest mismatch");	break;
+     case RPMERR_INTERNAL:	s = _("Internal error");	break;
+     case RPMERR_UNMAPPED_FILE:	s = _("Archive file not in header"); break;
+-    case RPMERR_INVALID_SYMLINK: s = _("Invalid symlink");	break;
++    case RPMERR_INVALID_SYMLINK: s = _("Unsafe symlink");	break;
+     case RPMERR_ENOTDIR:	s = strerror(ENOTDIR);	break;
+     case RPMERR_ENOENT:	s = strerror(ENOENT); break;
+     case RPMERR_ENOTEMPTY:	s = strerror(ENOTEMPTY); break;
+diff --git a/tests/rpmi.at b/tests/rpmi.at
+index 95b4497be..ae8b24437 100644
+--- a/tests/rpmi.at
++++ b/tests/rpmi.at
+@@ -1555,8 +1555,8 @@ runroot --setenv SOURCE_DATE_EPOCH 1699955855 rpm -U /build/RPMS/noarch/replacet
+ ],
+ [1],
+ [],
+-[error: failed to open dir opt of /opt/: Not a directory
+-error: unpacking of archive failed on file /opt/foo;6553448f: cpio: open failed - Not a directory
++[error: failed to open dir opt of /opt/: cpio: Unsafe symlink
++error: unpacking of archive failed on file /opt/foo;6553448f: cpio: Unsafe symlink
+ error: replacetest-1.0-1.noarch: install failed
+ ])
+ RPMTEST_CLEANUP
+-- 
+2.47.1
+

@@ -1,0 +1,11 @@
+--- rpm-4.18.90/macros.in.orig	2023-04-17 14:48:14.802719586 +0200
++++ rpm-4.18.90/macros.in	2023-04-17 14:48:25.268852972 +0200
+@@ -236,7 +236,7 @@
+ %clamp_mtime_to_source_date_epoch 0
+ 
+ #	If enabled, dilute user() and group() requires into recommends
+-#%_use_weak_usergroup_deps 1
++%_use_weak_usergroup_deps 1
+ 
+ #	The directory where newly built binary packages will be written.
+ %_rpmdir		%{_topdir}/RPMS

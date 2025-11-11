@@ -1,0 +1,35 @@
+From 2029533d7878a58874cda061d13c6188f4b3aed1 Mon Sep 17 00:00:00 2001
+Message-ID: <2029533d7878a58874cda061d13c6188f4b3aed1.1728896192.git.pmatilai@redhat.com>
+In-Reply-To: <3b0a150af79668052bf5842b68341adbde016005.1728896192.git.pmatilai@redhat.com>
+References: <3b0a150af79668052bf5842b68341adbde016005.1728896192.git.pmatilai@redhat.com>
+From: Michal Domonkos <mdomonko@redhat.com>
+Date: Mon, 9 Sep 2024 15:19:52 +0200
+Subject: [PATCH 3/3] Declare signCmd() static
+
+Commit 2c9ad2bbc1d00010880076cd5c73e97ffcb946ed added this new helper
+function for internal use and depite a missing declaration, the compiler
+defaulting to WITH_CXX=ON on master chugged along just fine... only
+until porting the same commit to a C-only branch (hello rpm-4.20.x)
+where it now produces a warning, oops.
+
+(cherry picked from commit a7784eccd9de674e97fc9577434334060b3abd23)
+---
+ sign/rpmgensig.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/sign/rpmgensig.c b/sign/rpmgensig.c
+index fb7368e14..d7d58fd4f 100644
+--- a/sign/rpmgensig.c
++++ b/sign/rpmgensig.c
+@@ -188,7 +188,7 @@ exit:
+     return sigtd;
+ }
+ 
+-char ** signCmd(const char *sigfile)
++static char ** signCmd(const char *sigfile)
+ {
+     int argc = 0;
+     char **argv = NULL;
+-- 
+2.47.0
+
