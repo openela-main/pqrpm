@@ -13,7 +13,7 @@
 
 %global rpmver 4.19.1.1
 #global snapver rc1
-%global baserelease 4
+%global baserelease 6
 %global sover 10
 
 %global srcver %{rpmver}%{?snapver:-%{snapver}}
@@ -100,6 +100,8 @@ rpm-4.19.x-rpmkeys-add-list-erase.patch
 rpm-4.19.x-multisig.patch
 rpm-4.19.x-pqc-algo.patch
 rpm-4.19.x-pqc-fixes.patch
+
+rpm-4.19.x-multisig-verify-fixes.patch
 
 # These are not yet upstream
 rpm-4.7.1-geode-i686.patch
@@ -282,6 +284,12 @@ install -m 644 %{SOURCE30} $RPM_BUILD_ROOT/%{_defaultdocdir}/rpm/
 %doc %{_defaultdocdir}/rpm/macros.rpmsign-sequoia
 
 %changelog
+* Thu Feb 05 2026 Michal Domonkos <mdomonko@redhat.com> - 4.19.1.1-6
+- Fix key import API to return NOTTRUSTED for disabled algorithms (RHEL-112700)
+
+* Mon Feb 02 2026 Michal Domonkos <mdomonko@redhat.com> - 4.19.1.1-5
+- Ignore signatures made by unknown or disabled algorithms (RHEL-112700)
+
 * Tue Aug 26 2025 Michal Domonkos <mdomonko@redhat.com> - 4.19.1.1-4
 - Fix rpmsign(8) man page (RHEL-109233)
 
